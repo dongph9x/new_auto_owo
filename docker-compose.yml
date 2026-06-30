@@ -1,0 +1,13 @@
+services:
+  neuraself:
+    build: .
+    container_name: neuraself
+    restart: unless-stopped
+    ports:
+      - "8000:8000"          # dashboard at http://localhost:8000
+    volumes:
+      - ./config:/app/config # accounts.json, settings, auth, per-account settings_<id>.json
+      - ./data:/app/data     # stats / history persistence
+    environment:
+      - NEURA_AUTOSTART=1     # skip the interactive menu, start all enabled accounts
+      - NEURA_SKIP_DEP_CHECK=1

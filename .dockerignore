@@ -1,0 +1,14 @@
+.git
+.gitignore
+.gitattributes
+__pycache__/
+**/__pycache__/
+*.pyc
+*.pyo
+venv/
+.venv/
+env/
+ENV/
+*.md
+neura_setup.bat
+neura_setup.sh

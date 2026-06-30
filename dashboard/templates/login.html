@@ -1,0 +1,302 @@
+<!--
+  This file is part of NeuraSelf-UwU.
+  Copyright (c) 2025-Present Routo
+
+  NeuraSelf-UwU is free software: you can redistribute it and/or modify
+  it under the terms of the GNU General Public License as published by
+  the Free Software Foundation, either version 3 of the License, or
+  (at your option) any later version.
+
+  You should have received a copy of the GNU General Public License
+  along with NeuraSelf-UwU. If not, see <https://www.gnu.org/licenses/>.
+-->
+<!DOCTYPE html>
+<html lang="en">
+
+<head>
+    <meta charset="UTF-8">
+    <title>NeuraSelf Auth</title>
+    <meta name="viewport" content="width=device-width, initial-scale=1.0">
+    <style>
+        * {
+            margin: 0;
+            padding: 0;
+            box-sizing: border-box;
+            font-family: 'Segoe UI', sans-serif;
+        }
+
+        html,
+        body {
+            height: 100%;
+            overflow: hidden;
+            background: #0b0000;
+            cursor: auto;
+        }
+
+        #bgCanvas {
+            position: absolute;
+            top: 0;
+            left: 0;
+            width: 100%;
+            height: 100%;
+            z-index: 0;
+            display: block;
+        }
+
+        .wrapper {
+            position: absolute;
+            top: 50%;
+            left: 50%;
+            transform: translate(-50%, -50%);
+            perspective: 1500px;
+            z-index: 2;
+        }
+
+        .login-container {
+            width: 400px;
+            padding: 50px;
+            border-radius: 20px;
+            background: rgba(30, 0, 0, 0.85);
+            box-shadow: 0 0 40px rgba(255, 0, 0, 0.5), 0 0 80px rgba(255, 0, 0, 0.2);
+            backdrop-filter: blur(15px);
+            transform-style: preserve-3d;
+            transition: transform 0.1s ease-out;
+            text-align: center;
+            position: relative;
+            overflow: hidden;
+            border: 2px solid rgba(255, 0, 0, 0.3);
+        }
+
+        .login-container h1 {
+            font-size: 2.5rem;
+            color: #ff0000;
+            text-shadow: 0 0 10px #ff0000, 0 0 25px #ff4444;
+            margin-bottom: 30px;
+            min-height: 2.5rem;
+        }
+
+        .input-wrapper {
+            position: relative;
+            margin-bottom: 30px;
+        }
+
+        .login-container input {
+            width: 100%;
+            padding: 14px 20px;
+            border: none;
+            border-radius: 12px;
+            background: rgba(255, 0, 0, 0.05);
+            color: #fff;
+            font-size: 1rem;
+            outline: none;
+            backdrop-filter: blur(6px);
+            position: relative;
+            z-index: 1;
+        }
+
+        .login-container label {
+            position: absolute;
+            left: 20px;
+            top: 14px;
+            color: #ff5555;
+            font-size: 0.9rem;
+            pointer-events: none;
+            transition: 0.2s all;
+            z-index: 2;
+        }
+
+        .login-container input:focus+label,
+        .login-container input:not(:placeholder-shown)+label {
+            top: -10px;
+            font-size: 0.75rem;
+            color: #ff0000;
+        }
+
+        .login-container input:focus {
+            border: 2px solid transparent;
+            position: relative;
+        }
+
+        .login-container input:focus::before {
+            content: '';
+            position: absolute;
+            top: -2px;
+            left: -2px;
+            width: calc(100% + 4px);
+            height: calc(100% + 4px);
+            border-radius: 14px;
+            border: 2px solid #ff0000;
+            background: linear-gradient(90deg, rgba(255, 0, 0, 0) 0%, #ff0000 50%, rgba(255, 0, 0, 0) 100%);
+            background-size: 200% 100%;
+            animation: neonBorder 1.5s linear infinite;
+            pointer-events: none;
+        }
+
+        @keyframes neonBorder {
+            0% {
+                background-position: 200% 0;
+            }
+
+            100% {
+                background-position: -200% 0;
+            }
+        }
+
+        .login-container button {
+            width: 100%;
+            padding: 14px 0;
+            border: none;
+            border-radius: 12px;
+            background: #ff0000;
+            color: #fff;
+            font-weight: bold;
+            font-size: 1rem;
+            cursor: pointer;
+            box-shadow: 0 0 25px #ff0000;
+            transition: 0.3s all;
+        }
+
+        .login-container button:hover {
+            background: #ff2222;
+            box-shadow: 0 0 40px #ff5555, 0 0 80px #ff2222 inset;
+            transform: scale(1.05);
+        }
+
+        .error-msg {
+            color: #ff4444;
+            margin-bottom: 20px;
+            font-size: 0.9em;
+            display: none;
+        }
+    </style>
+</head>
+
+<body>
+
+    <canvas id="bgCanvas"></canvas>
+
+    <div class="wrapper">
+        <div class="login-container" id="card">
+            <h1 id="typing"></h1>
+            <div id="error-display" class="error-msg"></div>
+            <form onsubmit="handleLogin(event)">
+                <div class="input-wrapper">
+                    <input type="text" id="username" placeholder=" " required>
+                    <label>Username</label>
+                </div>
+                <div class="input-wrapper">
+                    <input type="password" id="password" placeholder=" " required>
+                    <label>Password</label>
+                </div>
+                <button type="submit">Login</button>
+            </form>
+        </div>
+    </div>
+
+    <script>
+        // ---------------------------
+        const card = document.getElementById('card');
+        document.addEventListener('mousemove', e => {
+            const cx = window.innerWidth / 2;
+            const cy = window.innerHeight / 2;
+            const dx = e.clientX - cx;
+            const dy = e.clientY - cy;
+            card.style.transform = `rotateY(${dx / 50}deg) rotateX(${-dy / 50}deg)`;
+        });
+
+        // ---------------------------
+        const text = "NeuraSelf Auth";
+        const typingEl = document.getElementById('typing');
+        let i = 0;
+        function type() {
+            if (i < text.length) {
+                typingEl.textContent += text[i];
+                i++;
+                setTimeout(type, 100);
+            }
+        }
+        type();
+
+        // ---------------------------
+        function handleLogin(e) {
+            e.preventDefault();
+            const u = document.getElementById('username').value;
+            const p = document.getElementById('password').value;
+            const err = document.getElementById('error-display');
+
+            fetch('/login', {
+                method: 'POST',
+                headers: { 'Content-Type': 'application/json' },
+                body: JSON.stringify({ username: u, password: p })
+            })
+                .then(res => res.json())
+                .then(data => {
+                    if (data.success) {
+                        window.location.href = '/';
+                    } else {
+                        err.style.display = 'block';
+                        err.innerText = data.error || 'Login Failed';
+                        const btn = document.querySelector('button');
+                        btn.style.background = '#880000';
+                        setTimeout(() => btn.style.background = '#ff0000', 500);
+                    }
+                })
+                .catch(e => {
+                    err.style.display = 'block';
+                    err.innerText = 'Connection Error';
+                });
+        }
+
+        // ---------------------------
+        const canvas = document.getElementById('bgCanvas');
+        const ctx = canvas.getContext('2d');
+        canvas.width = window.innerWidth;
+        canvas.height = window.innerHeight;
+
+        class Line {
+            constructor(x, y, length, angle, speed) {
+                this.x = x;
+                this.y = y;
+                this.length = length;
+                this.angle = angle;
+                this.speed = speed;
+            }
+            update() {
+                this.x += Math.cos(this.angle) * this.speed;
+                this.y += Math.sin(this.angle) * this.speed;
+                if (this.x > canvas.width + 50) this.x = -50;
+                if (this.x < -50) this.x = canvas.width + 50;
+                if (this.y > canvas.height + 50) this.y = -50;
+                if (this.y < -50) this.y = canvas.height + 50;
+            }
+            draw(ctx) {
+                ctx.strokeStyle = "rgba(255,0,0,0.25)";
+                ctx.lineWidth = 1.5;
+                ctx.beginPath();
+                ctx.moveTo(this.x, this.y);
+                ctx.lineTo(this.x + Math.cos(this.angle) * this.length, this.y + Math.sin(this.angle) * this.length);
+                ctx.stroke();
+            }
+        }
+
+        const lines = [];
+        for (let i = 0; i < 100; i++) {
+            lines.push(new Line(Math.random() * canvas.width, Math.random() * canvas.height, 100 + Math.random() * 50, Math.random() * Math.PI * 2, 0.8 + Math.random() * 0.5));
+        }
+
+        function animate() {
+            ctx.clearRect(0, 0, canvas.width, canvas.height);
+            lines.forEach(line => { line.update(); line.draw(ctx); });
+            requestAnimationFrame(animate);
+        }
+        animate();
+
+        window.addEventListener('resize', () => {
+            canvas.width = window.innerWidth;
+            canvas.height = window.innerHeight;
+        });
+    </script>
+
+</body>
+
+</html>
