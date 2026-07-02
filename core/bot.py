@@ -16,6 +16,7 @@ import os
 import time
 import random
 import asyncio
+import itertools
 import re
 import sys
 import requests
@@ -84,6 +85,7 @@ class NeuraBot(commands.Bot):
         self.cmd_cooldowns = {}
         self.cmd_states = {}
         self.neura_queue = asyncio.PriorityQueue()
+        self._queue_seq = itertools.count()
         self.neura_scheduler_task = None
         self.is_busy = False
 
@@ -497,7 +499,10 @@ class NeuraBot(commands.Bot):
 
     async def neura_enqueue(self, content, priority=3, skip_typing=None, _cmd_id=None):
         options = {"skip_typing": skip_typing, "_cmd_id": _cmd_id}
-        item = (priority, time.time(), content, options)
+        # Use a monotonic counter (not time.time()) as the tie-breaker: two items can land
+        # on the identical timestamp, and PriorityQueue would then try to compare `options`
+        # (a dict), which raises TypeError and silently kills this fire-and-forget task.
+        item = (priority, next(self._queue_seq), content, options)
         await self.neura_queue.put(item)
 
     async def neura_queue_worker(self):
@@ -579,6 +584,7 @@ class NeuraBot(commands.Bot):
                 finally:
                     if cmd_id and cmd_id in self.cmd_states:
                         self.cmd_states[cmd_id]['in_queue'] = False
+                        self.cmd_states[cmd_id]['queued_since'] = None
                     self.neura_queue.task_done()
 
             except Exception as e:
@@ -591,12 +597,31 @@ class NeuraBot(commands.Bot):
             "priority": priority,
             "delay": delay,
             "last_ran": time.time() - delay + initial_offset,
-            "in_queue": False
+            "in_queue": False,
+            "queued_since": None
         }
+
+    async def _safe_dispatch(self, cmd_id, content, priority):
+        """Enqueue a scheduled command, guaranteeing in_queue is released even on failure.
+
+        neura_scheduler_worker fires this as a fire-and-forget task; if neura_enqueue
+        ever raised here uncaught, the cmd_id's in_queue flag would stay True forever
+        and the scheduler entry (e.g. daily/huntbot) would never run again.
+        """
+        try:
+            await self.neura_enqueue(content, priority=priority, _cmd_id=cmd_id)
+        except Exception as e:
+            self.log("ERROR", f"Failed to enqueue '{cmd_id}': {e}")
+            cstate = self.cmd_states.get(cmd_id)
+            if cstate:
+                cstate["in_queue"] = False
+                cstate["queued_since"] = None
+                cstate["last_ran"] = time.time()
 
     async def neura_scheduler_worker(self):
         await self.wait_until_ready()
         self.log("SYS", "NeuraScheduler started.")
+        STUCK_TIMEOUT = 120
         while self.active:
             try:
                 if self.paused:
@@ -604,23 +629,39 @@ class NeuraBot(commands.Bot):
                     continue
 
                 now = time.time()
-                for cmd_id, state in list(self.cmd_states.items()):
-                    if state["in_queue"]: continue
-                    
-                    if now - state["last_ran"] >= state["delay"]:
-                        state["in_queue"] = True
-                        actual_content = state["content"]
+                for cmd_id, cstate in list(self.cmd_states.items()):
+                    if cstate["in_queue"]:
+                        queued_since = cstate.get("queued_since")
+                        if queued_since and now - queued_since > STUCK_TIMEOUT:
+                            self.log("WARN", f"Scheduler: '{cmd_id}' stuck in queue for {int(now - queued_since)}s, resetting.")
+                            cstate["in_queue"] = False
+                            cstate["queued_since"] = None
+                            cstate["last_ran"] = now
+                        continue
+
+                    if now - cstate["last_ran"] >= cstate["delay"]:
+                        cstate["in_queue"] = True
+                        cstate["queued_since"] = now
+                        actual_content = cstate["content"]
                         if callable(actual_content):
-                            if asyncio.iscoroutinefunction(actual_content):
-                                actual_content = await actual_content()
-                            else:
-                                actual_content = actual_content()
-                        
+                            try:
+                                if asyncio.iscoroutinefunction(actual_content):
+                                    actual_content = await actual_content()
+                                else:
+                                    actual_content = actual_content()
+                            except Exception as e:
+                                self.log("ERROR", f"Scheduler dispatch error for '{cmd_id}': {e}")
+                                cstate["in_queue"] = False
+                                cstate["queued_since"] = None
+                                cstate["last_ran"] = now
+                                continue
+
                         if actual_content is not None:
-                            asyncio.create_task(self.neura_enqueue(actual_content, priority=state["priority"], _cmd_id=cmd_id))
+                            asyncio.create_task(self._safe_dispatch(cmd_id, actual_content, cstate["priority"]))
                         else:
-                            state["in_queue"] = False
-                            state["last_ran"] = time.time()
+                            cstate["in_queue"] = False
+                            cstate["queued_since"] = None
+                            cstate["last_ran"] = time.time()
 
                 await asyncio.sleep(1)
             except Exception as e:
