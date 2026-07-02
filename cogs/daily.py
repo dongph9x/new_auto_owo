@@ -16,6 +16,13 @@ import asyncio
 import time
 import random
 import re
+import datetime
+
+# OwO's "daily" reward resets on a fixed clock time (14:00 Vietnam/UTC+7), not
+# 24h after the last claim. Scheduling off a rolling 24h window drifts away from
+# the real reset and can leave the command claimable-but-unsent for a long time.
+DAILY_RESET_HOUR_VN = 14
+VN_TZ = datetime.timezone(datetime.timedelta(hours=7))
 
 class Daily(commands.Cog):
     def __init__(self, bot):
@@ -24,6 +31,17 @@ class Daily(commands.Cog):
         self.stats_file = 'data/stats_daily.json'
         self.last_run = self._load_last_run()
         self.last_daily_sent = 0
+
+    def _most_recent_reset_ts(self, ref=None):
+        ref = ref if ref is not None else time.time()
+        now_vn = datetime.datetime.fromtimestamp(ref, tz=VN_TZ)
+        reset_today = now_vn.replace(hour=DAILY_RESET_HOUR_VN, minute=0, second=0, microsecond=0)
+        if now_vn < reset_today:
+            reset_today -= datetime.timedelta(days=1)
+        return reset_today.timestamp()
+
+    def _next_reset_ts(self, ref=None):
+        return self._most_recent_reset_ts(ref) + 86400
 
     def _load_last_run(self):
         if os.path.exists(self.stats_file):
@@ -54,23 +72,29 @@ class Daily(commands.Cog):
         self.bot.log("INFO", "Sending daily command...")
         self.last_daily_sent = time.time()
         self.last_run = time.time()
-        self.cooldown = 86400 
         self._save_last_run(self.last_run)
-        
+
+        # Assume success and aim for the next fixed reset; if OwO actually replies
+        # with a "wait" (already claimed elsewhere), _process_response overrides this
+        # with the exact remaining time OwO reports.
+        self.cooldown = max(10, self._next_reset_ts() - time.time())
+
         if 'daily' in self.bot.cmd_states:
-             self.bot.cmd_states['daily']['delay'] = 86400
+             self.bot.cmd_states['daily']['delay'] = self.cooldown
 
     async def register_actions(self):
         cfg = self.bot.config.get('commands', {}).get('daily', {})
         if cfg.get('enabled', False):
             last_run = self._load_last_run()
-            remaining = last_run + 86400 - time.time()
-            
-            if remaining <= 0:
-                delay = 3
+            most_recent_reset = self._most_recent_reset_ts()
+
+            if last_run >= most_recent_reset:
+                # Already claimed since the last 14:00 VN reset -> wait for the next one.
+                delay = self._next_reset_ts() - time.time()
             else:
-                delay = remaining
-                
+                # Haven't claimed since the last reset -> free to send now.
+                delay = 3
+
             await self.bot.neura_register_command("daily", "daily", priority=4, delay=max(10, delay), initial_offset=0)
 
     @commands.Cog.listener()

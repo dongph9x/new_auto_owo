@@ -18,25 +18,31 @@ import os
 import core.state as state
 
 class HuntBot(commands.Cog):
+    DEFAULT_MAX_CHECK_INTERVAL = 300  # never wait longer than this between check-ins, even on a multi-hour mission
+
     def __init__(self, bot):
         self.bot = bot
         self.active = True
         self.last_check = 0.0
-        self.check_interval = 900
+        self.check_interval = self.DEFAULT_MAX_CHECK_INTERVAL
         self.task = None
         self.password_reset_regex = r"(?<=Password will reset in )(\d+)"
         self.huntbot_time_regex = r"(\d+)([DHM])"
         self.last_upgrade_essence = 0
         self.last_upgrade_time = 0.0
 
+    def _max_check_interval(self, cfg=None):
+        cfg = cfg if cfg is not None else self.bot.config.get('commands', {}).get('huntbot', {})
+        return cfg.get('max_check_interval', self.DEFAULT_MAX_CHECK_INTERVAL)
+
     def trigger_action(self):
         cfg = self.bot.config.get('commands', {}).get('huntbot', {})
         amount = cfg.get('cash_to_spend', 16000)
-        
+
         if 'huntbot' in self.bot.cmd_states:
             self.bot.cmd_states['huntbot']['content'] = f"huntbot {amount}"
-            self.bot.cmd_states['huntbot']['delay'] = self.check_interval
-        
+            self.bot.cmd_states['huntbot']['delay'] = min(self.check_interval, self._max_check_interval(cfg))
+
         self.last_command_time = time.time()
         self.last_check = time.time()
         self.bot.is_busy = True
@@ -45,7 +51,7 @@ class HuntBot(commands.Cog):
         cfg = self.bot.config.get('commands', {}).get('huntbot', {})
         if cfg.get('enabled', False):
             self.bot.log("SYS", "HuntBot Module configured.")
-            await self.bot.neura_register_command("huntbot", "huntbot 16000", priority=4, delay=900, initial_offset=20)
+            await self.bot.neura_register_command("huntbot", "huntbot 16000", priority=4, delay=self._max_check_interval(cfg), initial_offset=20)
             self.trigger_action()
 
     @commands.Cog.listener()
@@ -165,18 +171,22 @@ class HuntBot(commands.Cog):
                 elif unit == "D": total_seconds += int(amount) * 86400
             
             if found:
-                self.check_interval = total_seconds + 30
+                real_remaining = total_seconds + 30
+                self.check_interval = min(real_remaining, self._max_check_interval(cfg))
                 self.last_check = time.time()
                 if 'huntbot' in self.bot.cmd_states:
                     self.bot.cmd_states['huntbot']['delay'] = self.check_interval
                     self.bot.cmd_states['huntbot']['last_ran'] = time.time()
                 self.bot.is_busy = False
-                self.bot.log("AutoHunt", f"HuntBot busy. Resyncing for {round(total_seconds/60)}m")
+                if self.check_interval < real_remaining:
+                    self.bot.log("AutoHunt", f"HuntBot busy for {round(total_seconds/60)}m. Checking back in {round(self.check_interval/60)}m (safety poll).")
+                else:
+                    self.bot.log("AutoHunt", f"HuntBot busy. Resyncing for {round(total_seconds/60)}m")
 
         elif "i am back with" in content_lower or "beep boop. i am back with" in content_lower:
             rewards = content.split('back with')[-1].strip().upper() if 'back with' in content_lower else "UNKNOWN REWARDS"
             self.bot.log("AutoHunt", f"HuntBot returned! Rewards: {rewards[:100]}")
-            self.check_interval = 900
+            self.check_interval = self._max_check_interval(cfg)
             self.last_check = time.time() - 20
             if 'huntbot' in self.bot.cmd_states:
                 self.bot.cmd_states['huntbot']['delay'] = 20
