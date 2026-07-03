@@ -112,8 +112,9 @@ class Security(commands.Cog):
                 pass
     
     def _send_webhook(self, title, message):
-        """Fire-and-forget: schedules the (possibly repeated) webhook send on the event loop."""
+        """Fire-and-forget: schedules the webhook send + cross-account DM alert on the event loop."""
         asyncio.create_task(self._send_webhook_async(title, message))
+        asyncio.create_task(self._notify_via_sibling_accounts(title, message))
 
     async def _send_webhook_async(self, title, message):
         cfg = self.bot.config.get('security', {})
@@ -122,11 +123,10 @@ class Security(commands.Cog):
         url = wh_cfg.get('url')
         if not url: return
 
-        # Tag the user who owns the account hitting the captcha (or an override id from config)
         mention_id = wh_cfg.get('mention_user_id') or getattr(self.bot, 'user_id', None)
         content = f"<@{mention_id}>" if mention_id else "@here"
 
-        repeat_count = 3
+        repeat_count = 2
         repeat_interval = 10
 
         for i in range(repeat_count):
@@ -159,6 +159,28 @@ class Security(commands.Cog):
 
             if i < repeat_count - 1:
                 await asyncio.sleep(repeat_interval)
+
+    async def _notify_via_sibling_accounts(self, title, message):
+        """Try each other currently-running account in turn until one successfully DMs
+        this account's owner about the incident — stop as soon as one gets through,
+        no need to spam from every sibling once the alert has landed.
+        """
+        target_id = getattr(self.bot, 'user_id', None)
+        if not target_id:
+            return
+
+        for other_bot in list(state.bot_instances):
+            if other_bot is self.bot:
+                continue
+            if not (other_bot.is_ready and other_bot.user):
+                continue
+            try:
+                user = other_bot.get_user(int(target_id)) or await other_bot.fetch_user(int(target_id))
+                if user:
+                    await user.send(f"**{title}** — {self.bot.username} cần xử lý!\n{message}")
+                    return  # got through, no need to try the remaining siblings
+            except Exception as e:
+                other_bot.log("ERROR", f"Failed to DM {self.bot.username} about security alert: {e}")
 
     async def play_beep(self):
         def _play():
