@@ -17,6 +17,7 @@ import os
 import threading
 import unicodedata
 import requests
+import aiohttp
 import json
 import discord
 from discord.ext import commands
@@ -111,6 +112,10 @@ class Security(commands.Cog):
                 pass
     
     def _send_webhook(self, title, message):
+        """Fire-and-forget: schedules the (possibly repeated) webhook send on the event loop."""
+        asyncio.create_task(self._send_webhook_async(title, message))
+
+    async def _send_webhook_async(self, title, message):
         cfg = self.bot.config.get('security', {})
         wh_cfg = cfg.get('webhook', {})
         if not wh_cfg.get('enabled', True): return
@@ -121,25 +126,39 @@ class Security(commands.Cog):
         mention_id = wh_cfg.get('mention_user_id') or getattr(self.bot, 'user_id', None)
         content = f"<@{mention_id}>" if mention_id else "@here"
 
-        payload = {
-            "content": content,
-            "allowed_mentions": {"parse": ["users", "everyone"]},
-            "embeds": [{
-                "title": title,
-                "description": message,
-                "color": 0xFF3B3B,
-                "author": {
-                    "name": f"NeuraSelf Security - {self.bot.username}",
-                    "icon_url": "https://cdn.discordapp.com/attachments/1450161614375620802/1456632606002118657/neuralogo.png"
-                },
-                "footer": {"text": f"NeuraSelf • Account: {self.bot.username}"},
-                "timestamp": time.strftime('%Y-%m-%dT%H:%M:%S')
-            }]
-        }
-        try:
-            requests.post(url, json=payload, timeout=5)
-        except:
-            pass
+        repeat_count = 3
+        repeat_interval = 10
+
+        for i in range(repeat_count):
+            payload = {
+                "content": content,
+                "allowed_mentions": {"parse": ["users", "everyone"]},
+                "embeds": [{
+                    "title": title,
+                    "description": message,
+                    "color": 0xFF3B3B,
+                    "author": {
+                        "name": f"NeuraSelf Security - {self.bot.username}",
+                        "icon_url": "https://cdn.discordapp.com/attachments/1450161614375620802/1456632606002118657/neuralogo.png"
+                    },
+                    "footer": {"text": f"NeuraSelf • Account: {self.bot.username} • Alert {i + 1}/{repeat_count}"},
+                    "timestamp": time.strftime('%Y-%m-%dT%H:%M:%S')
+                }]
+            }
+            try:
+                # Use the bot's own aiohttp session (non-blocking) instead of `requests`
+                # (blocking) since this now runs repeatedly over several seconds and would
+                # otherwise stall the shared event loop that every account runs on.
+                if self.bot.session:
+                    async with self.bot.session.post(url, json=payload, timeout=aiohttp.ClientTimeout(total=5)) as resp:
+                        pass
+                else:
+                    requests.post(url, json=payload, timeout=5)
+            except Exception:
+                pass
+
+            if i < repeat_count - 1:
+                await asyncio.sleep(repeat_interval)
 
     async def play_beep(self):
         def _play():
