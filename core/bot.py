@@ -393,14 +393,17 @@ class NeuraBot(commands.Bot):
             else:
                 self.accounts = []
 
+            self.account_role = 'user'  # fail-closed default: unmatched/unknown accounts can't use admin-only features
+
             if self.accounts:
                 current_acc = None
                 if uid:
                     current_acc = next((a for a in self.accounts if str(a.get('id', a.get('user_id', ''))) == uid), None)
                 if not current_acc and self.token:
                     current_acc = next((a for a in self.accounts if a.get('token') == self.token), None)
-                
+
                 if current_acc:
+                    self.account_role = current_acc.get('role', 'user')
                     new_channels = current_acc.get('channels', [])
                     if new_channels != self.channels:
                         self.channels = new_channels

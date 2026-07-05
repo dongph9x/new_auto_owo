@@ -228,6 +228,26 @@ function renderSettings(cfg) {
         document.querySelectorAll('#config .module-header i').forEach(el => el.style.transform = 'rotate(180deg)');
         document.querySelectorAll('#config .module-header').forEach(el => el.classList.add('active'));
     }, 50);
+
+    applyConfigVisibilityRules();
+}
+
+// Some config sub-sections are admin-only (e.g. captcha_solver holds a paid
+// third-party API key). This only hides the DOM node — the underlying values
+// stay in `currentConfig` untouched, so saving from a non-admin account still
+// round-trips them correctly. The actual enforcement (whether auto-solve is
+// allowed to run) happens server-side in cogs/security.py based on account_role;
+// this is just so non-admin accounts don't see/edit the field at all.
+const ADMIN_ONLY_SUBSECTIONS = ['security.captcha_solver'];
+
+function applyConfigVisibilityRules() {
+    const acc = accountsList.find(a => a.id === currentAccountId);
+    const isAdmin = acc ? acc.role === 'admin' : false;
+
+    ADMIN_ONLY_SUBSECTIONS.forEach(path => {
+        const el = document.querySelector(`.config-subsection[data-path="${path}"]`);
+        if (el) el.style.display = isAdmin ? '' : 'none';
+    });
 }
 
 function filterConfig(categoryId, btnEl) {
@@ -293,12 +313,14 @@ function renderCategory(obj, path) {
             h += renderField(fullPath, { l: key, type: 'range' }, val);
         } else if (typeof val === 'object' && val !== null && !Array.isArray(val)) {
             h += `
-                <div class="module-header" onclick="toggleDropdown(this, event)" style="margin-top: 15px; border: none; padding: 10px 0;">
-                    <span class="module-title" style="font-size: 0.85rem;">${key}</span>
-                    <span class="icon-svg" style="--icon: url('/static/assets/neura_icons/chevron-down.svg');"></span>
-                </div>
-                <div class="dropdown-content">
-                    ${renderCategory(val, fullPath)}
+                <div class="config-subsection" data-path="${fullPath}">
+                    <div class="module-header" onclick="toggleDropdown(this, event)" style="margin-top: 15px; border: none; padding: 10px 0;">
+                        <span class="module-title" style="font-size: 0.85rem;">${key}</span>
+                        <span class="icon-svg" style="--icon: url('/static/assets/neura_icons/chevron-down.svg');"></span>
+                    </div>
+                    <div class="dropdown-content">
+                        ${renderCategory(val, fullPath)}
+                    </div>
                 </div>
             `;
         } else {

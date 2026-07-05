@@ -2,6 +2,7 @@
     "accounts": [
         {
             "name": "account-1",
+            "role": "user",
             "token": "YOUR_DISCORD_TOKEN_HERE",
             "channels": ["YOUR_CHANNEL_ID_HERE"],
             "enabled": true

@@ -70,6 +70,21 @@ def login_required(f):
         return f(*args, **kwargs)
     return decorated_function
 
+def check_credentials(cfg, username, password):
+    """Checks the submitted login against the primary (admin) account and the
+    optional secondary `user_login` account. Returns the matched role, or None."""
+    if not cfg:
+        return None
+    if username == cfg.get('username') and password == cfg.get('password'):
+        return cfg.get('role', 'admin')
+    user_login = cfg.get('user_login')
+    if user_login and username == user_login.get('username') and password == user_login.get('password'):
+        return user_login.get('role', 'user')
+    return None
+
+def current_role():
+    return session.get('role', 'user')
+
 def check_rate_limit(ip):
     now = time.time()
     if ip in LOGIN_ATTEMPTS:
@@ -116,12 +131,14 @@ def login():
 
         data = request.json
         cfg = load_auth_config()
-        
+
         if not cfg:
              return jsonify({'success': False, 'error': 'Auth config missing'})
-             
-        if data.get('username') == cfg.get('username') and data.get('password') == cfg.get('password'):
+
+        role = check_credentials(cfg, data.get('username'), data.get('password'))
+        if role:
             session['logged_in'] = True
+            session['role'] = role
             session.permanent = True
             if ip in LOGIN_ATTEMPTS: del LOGIN_ATTEMPTS[ip]
             return jsonify({'success': True})
@@ -133,30 +150,68 @@ def login():
 
 @app.route('/logout')
 def logout():
-    session.pop('logged_in', None)
+    session.clear()
     return redirect(url_for('login'))
 
 @app.route('/api/accounts/list')
 @login_required
 def account_list():
+    try:
+        with open(os.path.join(state.CONFIG_DIR, 'accounts.json'), 'r') as f:
+            names_by_token = {a.get('token'): a.get('name') for a in json.load(f).get('accounts', [])}
+    except Exception:
+        names_by_token = {}
+
+    session_role = current_role()
     accounts = []
     for bot in state.bot_instances:
         if not bot.user or not bot.is_ready: continue
+        if session_role != 'admin' and getattr(bot, 'account_role', 'user') == 'admin':
+            continue  # admin accounts are invisible to non-admin dashboard logins
         accounts.append({
             'id': str(bot.user.id),
             'username': bot.username,
+            'name': names_by_token.get(bot.token, bot.username),
+            'role': getattr(bot, 'account_role', 'user'),
             'avatar': str(bot.user.display_avatar.url) if bot.user.display_avatar else None,
             'paused': bot.paused
         })
     return jsonify(accounts)
 
+def _visible_bots(session_role):
+    """Bot instances the current dashboard session is allowed to see/act on."""
+    if session_role == 'admin':
+        return list(state.bot_instances)
+    return [b for b in state.bot_instances if getattr(b, 'account_role', 'user') != 'admin']
+
 def get_bot(account_id):
+    # Every route below resolves its target bot through here, so this is the single
+    # choke point that keeps a non-admin dashboard session from touching admin accounts
+    # (stats/control/security/captcha endpoints all call get_bot()).
+    visible = _visible_bots(current_role())
     if not account_id:
-        return state.bot_instances[0] if state.bot_instances else None
-    for bot in state.bot_instances:
+        return visible[0] if visible else None
+    for bot in visible:
         if bot.user and str(bot.user.id) == str(account_id):
             return bot
-    return state.bot_instances[0] if state.bot_instances else None
+    return visible[0] if visible else None
+
+def role_of_account_id(account_id):
+    """Looks up an account's role by id, independent of whether its bot is currently
+    running (accounts.json is authoritative; falls back to a live bot instance)."""
+    if not account_id:
+        return None  # global, not tied to a specific account
+    try:
+        with open(os.path.join(state.CONFIG_DIR, 'accounts.json'), 'r') as f:
+            for a in json.load(f).get('accounts', []):
+                if str(a.get('id', a.get('user_id', ''))) == str(account_id):
+                    return a.get('role', 'user')
+    except Exception:
+        pass
+    for bot in state.bot_instances:
+        if bot.user and str(bot.user.id) == str(account_id):
+            return getattr(bot, 'account_role', 'user')
+    return 'user'
 
 
 @app.route('/api/stats')
@@ -297,23 +352,47 @@ def get_analytics():
 @login_required
 def settings():
     account_id = request.args.get('id')
-    
+    session_role = current_role()
+
+    # Doesn't go through get_bot() (it operates on the settings file directly, even
+    # for accounts whose bot isn't currently running), so it needs its own guard.
+    if role_of_account_id(account_id) == 'admin' and session_role != 'admin':
+        return jsonify({"status": "error", "message": "Forbidden"}), 403
+
     if account_id:
         config_path = os.path.join(state.CONFIG_DIR, f'settings_{account_id}.json')
     else:
         config_path = os.path.join(state.CONFIG_DIR, 'settings.json')
-        
+
     if request.method == 'POST':
         new_config = request.json
+
+        if session_role != 'admin':
+            # Global settings cascade into every account (including admin ones) via
+            # deep-merge, so a non-admin session must never be able to smuggle
+            # captcha_solver changes in through here, even when editing the global file.
+            try:
+                existing = {}
+                if os.path.exists(config_path):
+                    with open(config_path, 'r') as f:
+                        existing = json.load(f)
+                existing_solver = existing.get('security', {}).get('captcha_solver')
+                if existing_solver is not None:
+                    new_config.setdefault('security', {})['captcha_solver'] = existing_solver
+                elif 'security' in new_config and 'captcha_solver' in new_config.get('security', {}):
+                    del new_config['security']['captcha_solver']
+            except Exception:
+                pass
+
         try:
             with open(config_path, 'w') as f:
                 json.dump(new_config, f, indent=4)
-            
+
             # sync to active bot instance if running
             for bot in state.bot_instances:
                 if (not account_id) or (bot.user and str(bot.user.id) == str(account_id)):
                     asyncio.run_coroutine_threadsafe(bot.sync_settings(new_config), bot.loop)
-            
+
             state.log_command("SYS", f"Settings updated for {'Account ' + account_id if account_id else 'Global'}", "success")
             return jsonify({"status": "success"})
         except Exception as e:

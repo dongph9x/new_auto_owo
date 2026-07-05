@@ -194,6 +194,7 @@
         "dashboard_url": "http://your-vps-ip-or-domain:8000",
         "captcha_solver": {
             "enabled": false,
+            "provider": "nopecha",
             "api_key": ""
         },
         "open_captcha_url_on_pc": true,
