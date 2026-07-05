@@ -62,6 +62,7 @@ class Security(commands.Cog):
             "solvingthecaptcha",
             "letterword"
         ]
+        self._captcha_alert_task = None
 
     async def register_actions(self):
         cfg = self.bot.config.get('security', {})
@@ -182,6 +183,74 @@ class Security(commands.Cog):
             except Exception as e:
                 other_bot.log("ERROR", f"Failed to DM {self.bot.username} about security alert: {e}")
 
+    def _build_clear_link(self):
+        cfg = self.bot.config.get('security', {})
+        base_url = (cfg.get('dashboard_url') or 'http://localhost:8000').rstrip('/')
+        uid = str(self.bot.user_id)
+        token = state.captcha_clear_token(uid)
+        return f"{base_url}/security/clear-captcha?id={uid}&token={token}"
+
+    async def _send_webhook_single(self, title, message):
+        """One-shot webhook post, used by the continuous captcha loop (which handles
+        its own repeat/interval timing, so it doesn't need _send_webhook_async's
+        built-in repeat)."""
+        cfg = self.bot.config.get('security', {})
+        wh_cfg = cfg.get('webhook', {})
+        if not wh_cfg.get('enabled', True): return
+        url = wh_cfg.get('url')
+        if not url: return
+
+        mention_id = wh_cfg.get('mention_user_id') or getattr(self.bot, 'user_id', None)
+        content = f"<@{mention_id}>" if mention_id else "@here"
+
+        payload = {
+            "content": content,
+            "allowed_mentions": {"parse": ["users", "everyone"]},
+            "embeds": [{
+                "title": title,
+                "description": message,
+                "color": 0xFF3B3B,
+                "author": {
+                    "name": f"NeuraSelf Security - {self.bot.username}",
+                    "icon_url": "https://cdn.discordapp.com/attachments/1450161614375620802/1456632606002118657/neuralogo.png"
+                },
+                "footer": {"text": f"NeuraSelf • Account: {self.bot.username} • Đang chờ xử lý captcha"},
+                "timestamp": time.strftime('%Y-%m-%dT%H:%M:%S')
+            }]
+        }
+        try:
+            if self.bot.session:
+                async with self.bot.session.post(url, json=payload, timeout=aiohttp.ClientTimeout(total=5)) as resp:
+                    pass
+            else:
+                requests.post(url, json=payload, timeout=5)
+        except Exception:
+            pass
+
+    def _start_continuous_captcha_alert(self, title, message):
+        """Keep nagging (webhook + cross-account DM) every 10s until the account is
+        un-paused, either by the user clicking the clear-link in the DM, or by
+        resuming the bot manually (dashboard / auto-verify)."""
+        st = self.bot.stats
+        already_active = st.get('captcha_active', False)
+        st['captcha_active'] = True
+
+        if already_active and self._captcha_alert_task and not self._captcha_alert_task.done():
+            return  # already nagging, no need for a second overlapping loop
+
+        self._captcha_alert_task = asyncio.create_task(self._captcha_alert_loop(title, message))
+
+    async def _captcha_alert_loop(self, title, message):
+        clear_link = self._build_clear_link()
+        full_message = f"{message}\n\n🔗 Đã xử lý xong? Bấm vào đây để tắt nhắc: {clear_link}"
+
+        while self.bot.stats.get('captcha_active') and self.bot.paused:
+            await self._send_webhook_single(title, full_message)
+            await self._notify_via_sibling_accounts(title, full_message)
+            await asyncio.sleep(10)
+
+        self.bot.stats['captcha_active'] = False
+
     async def play_beep(self):
         def _play():
             if not os.path.exists(self.beep_file):
@@ -227,7 +296,8 @@ class Security(commands.Cog):
                 self.bot.throttle_until = 0.0
                 self.bot.last_sent_time = 0
                 self.bot.warmup_until = 0
-                
+                self.bot.stats['captcha_active'] = False
+
                 grinding_cog = self.bot.get_cog('Grinding')
                 if grinding_cog:
                     grinding_cog.cooldowns['hunt'] = 0
@@ -288,7 +358,7 @@ class Security(commands.Cog):
                         self._show_desktop_notification("YesCaptcha failed! Solve manually.")
 
                 if not autosolved:
-                    self._send_webhook("DM CAPTCHA", f"Solve link in DM: {captcha_url}")
+                    self._start_continuous_captcha_alert("DM CAPTCHA", f"Solve link in DM: {captcha_url}")
                     if sys.platform == "win32" and sec_cfg.get("open_captcha_url_on_pc", False):
                         self.bot.log("SYS", "Opening Captcha in Browser with Auto-Login...")
                         asyncio.create_task(self.bot.web_solver.open_in_browser(captcha_url))
@@ -347,7 +417,7 @@ class Security(commands.Cog):
             await self.play_beep()
             self._show_desktop_notification("Image captcha detected! Check DMs.")
             img_urls = "\n".join([att.url for att in message.attachments])
-            self._send_webhook("IMAGE CAPTCHA DETECTED", f"Message:\n{content}\n\nImages:\n{img_urls}")
+            self._start_continuous_captcha_alert("IMAGE CAPTCHA DETECTED", f"Message:\n{content}\n\nImages:\n{img_urls}")
             return
         captcha_keywords_hit = self._contains_keyword(text_to_check, self.captcha_keywords)
         captcha_url = self._get_captcha_url(message)
@@ -381,7 +451,7 @@ class Security(commands.Cog):
 
             if not autosolved:
                 solve_link = captcha_url or "https://owobot.com/captcha"
-                self._send_webhook("CAPTCHA DETECTED", f"Solve: {solve_link}")
+                self._start_continuous_captcha_alert("CAPTCHA DETECTED", f"Solve: {solve_link}")
                 if sys.platform == "win32" and sec_cfg.get("open_captcha_url_on_pc", False):
                     self.bot.log("SYS", "Opening Captcha in Browser with Auto-Login...")
                     asyncio.create_task(self.bot.web_solver.open_in_browser(captcha_url))

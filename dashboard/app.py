@@ -18,6 +18,7 @@ import json
 import logging
 import os
 import secrets
+import hmac
 import core.state as state
 import utils.utils as utils
 import asyncio
@@ -402,7 +403,15 @@ def control():
             bot.loop
         )
         state.log_command("CMD", "Manual Cash Check Sent", "info", bot_name=bot.username)
-        
+
+    elif action == 'disable_dm':
+        # Same effect as clicking the clear-link in the alert DM: stops the repeating
+        # webhook/DM nag. Does NOT resume the bot — the captcha still needs solving.
+        uid = str(bot.user.id) if bot.user else account_id
+        if uid in state.account_stats:
+            state.account_stats[uid]['captcha_active'] = False
+        state.log_command("SEC", f"Captcha DM alert disabled via Dashboard for {bot.username}", "success")
+
     return jsonify({'success': True})
 
 @app.route('/api/security', methods=['POST'])
@@ -418,9 +427,37 @@ def security():
     if action == 'resume':
         bot.paused = False
         bot.throttle_until = 0
+        uid = str(bot.user.id) if bot.user else account_id
+        if uid in state.account_stats:
+            state.account_stats[uid]['captcha_active'] = False
         state.log_command("SEC", f"User Resumed {bot.username} from Security Alert", "success")
-            
+
     return jsonify({'success': True})
+
+@app.route('/security/clear-captcha')
+def clear_captcha_alert():
+    """One-click link sent in the repeating captcha-alert DM. No login required —
+    it's protected instead by an unguessable HMAC token so it works straight from a
+    phone notification without having to sign into the dashboard first."""
+    account_id = request.args.get('id')
+    token = request.args.get('token')
+    if not account_id or not token:
+        return "Invalid link.", 400
+
+    expected = state.captcha_clear_token(account_id)
+    if not hmac.compare_digest(token, expected):
+        return "Invalid or expired link.", 403
+
+    if account_id in state.account_stats:
+        state.account_stats[account_id]['captcha_active'] = False
+    state.log_command("SEC", f"Captcha alert cleared via link for account {account_id}", "success")
+
+    return """
+    <html><body style="font-family:sans-serif;text-align:center;padding-top:60px;background:#111;color:#eee;">
+        <h2>✅ Đã tắt cảnh báo captcha.</h2>
+        <p>Bạn có thể đóng tab này.</p>
+    </body></html>
+    """
 
 @app.route('/api/captcha/current')
 @login_required

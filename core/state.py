@@ -12,6 +12,8 @@
 import time
 import json
 import os
+import hmac
+import hashlib
 import datetime
 from collections import deque
 import utils.history_tracker as ht
@@ -66,8 +68,24 @@ def get_empty_stats():
         'next_quest_timer': None,
         'session_hunt_count': 0,
         'session_battle_count': 0,
-        'session_owo_count': 0
+        'session_owo_count': 0,
+        'captcha_active': False
     }
+
+_AUTH_FILE = os.path.join(CONFIG_DIR, 'auth.json')
+
+def get_dashboard_secret():
+    """Shared secret (dashboard's Flask secret_key) used to sign one-click links
+    such as the "clear captcha alert" DM link, so they work without a login."""
+    try:
+        with open(_AUTH_FILE, 'r') as f:
+            return json.load(f).get('secret_key', 'neuraself_fallback_secret')
+    except Exception:
+        return 'neuraself_fallback_secret'
+
+def captcha_clear_token(account_id):
+    secret = get_dashboard_secret().encode()
+    return hmac.new(secret, str(account_id).encode(), hashlib.sha256).hexdigest()[:20]
 
 def save_account_stats():
     try:
@@ -87,7 +105,8 @@ def save_account_stats():
                 'username': st.get('username', 'Unknown'),
                 'quest_data': st.get('quest_data', []),
                 'next_quest_timer': st.get('next_quest_timer'),
-                'current_cash': st.get('current_cash', 0)
+                'current_cash': st.get('current_cash', 0),
+                'captcha_active': st.get('captcha_active', False)
             }
         
         os.makedirs('config', exist_ok=True)

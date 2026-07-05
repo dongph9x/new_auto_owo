@@ -76,7 +76,12 @@ class HuntBot(commands.Cog):
         
         is_for_me = self.bot.is_message_for_me(message)
         
-        generic_huntbot_patterns = ["i will be back in", "i am back with", "beep boop. i am back with"]
+        generic_huntbot_patterns = [
+            "i will be back in", "i am back with", "beep boop. i am back with",
+            "please include your password", "here is your password",
+            "confirm your identity", "link below",
+            "wrong password", "incorrect password"
+        ]
         if not is_for_me and any(p in content_lower for p in generic_huntbot_patterns):
             if hasattr(self, 'last_command_time') and (time.time() - self.last_command_time < 45):
                 is_for_me = True
