@@ -16,6 +16,15 @@ let currentConfig = {}, originalConfig = null, globalAnalyticsData = null;
 let lineChart = null, sessChart = null, cashChart = null, pieChart = null, captchaChart = null;
 let currentAccountId = null;
 let accountsList = [];
+let mySessionRole = null;
+
+async function fetchSessionRole() {
+    try {
+        const r = await fetch('/api/session');
+        const data = await r.json();
+        mySessionRole = data.role;
+    } catch (e) { console.error("Failed to fetch session role", e); }
+}
 
 function showToast(message, type = 'success') {
     const toast = document.getElementById('neura-toast');
@@ -232,17 +241,16 @@ function renderSettings(cfg) {
     applyConfigVisibilityRules();
 }
 
-// Some config sub-sections are admin-only (e.g. captcha_solver holds a paid
-// third-party API key). This only hides the DOM node — the underlying values
-// stay in `currentConfig` untouched, so saving from a non-admin account still
-// round-trips them correctly. The actual enforcement (whether auto-solve is
-// allowed to run) happens server-side in cogs/security.py based on account_role;
-// this is just so non-admin accounts don't see/edit the field at all.
+// Some config sub-sections are only editable by an admin dashboard login (e.g.
+// captcha_solver holds a paid third-party API key) — regardless of which bot
+// account (any role) is currently selected in the dropdown. This only hides the
+// DOM node; the server also redacts/protects the field for non-admin sessions
+// (see /api/settings in dashboard/app.py), so this is just so an admin session
+// doesn't have to hunt for it and a non-admin session never sees it rendered.
 const ADMIN_ONLY_SUBSECTIONS = ['security.captcha_solver'];
 
 function applyConfigVisibilityRules() {
-    const acc = accountsList.find(a => a.id === currentAccountId);
-    const isAdmin = acc ? acc.role === 'admin' : false;
+    const isAdmin = mySessionRole === 'admin';
 
     ADMIN_ONLY_SUBSECTIONS.forEach(path => {
         const el = document.querySelector(`.config-subsection[data-path="${path}"]`);
@@ -988,6 +996,7 @@ function initDynamicTilt() {
 
 document.addEventListener('DOMContentLoaded', () => {
     initDashCharts();
+    fetchSessionRole();
     fetchAccounts();
     loadConfig();
     initDynamicTilt();

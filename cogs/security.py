@@ -346,9 +346,10 @@ class Security(commands.Cog):
                 sec_cfg = self.bot.config.get("security", {})
                 sol_cfg = sec_cfg.get("captcha_solver", {})
 
+                # Who may VIEW/EDIT captcha_solver (admin dashboard session only) is enforced
+                # in dashboard/app.py; any account role may USE it here once configured.
                 autosolved = False
-                is_admin = getattr(self.bot, 'account_role', 'user') == 'admin'
-                if sol_cfg.get("enabled", True) and sol_cfg.get("api_key") and is_admin:
+                if sol_cfg.get("enabled", True) and sol_cfg.get("api_key"):
                     self.bot.log("SYS", f"Attempting {self.bot.web_solver.provider} auto-solve for DM...")
                     autosolved = await self.bot.web_solver.auto_verify()
                     if autosolved:
@@ -357,8 +358,6 @@ class Security(commands.Cog):
                     else:
                         self.bot.log("ERROR", f"{self.bot.web_solver.provider} auto-solve failed (DM)!")
                         self._show_desktop_notification("Auto-solve failed! Solve manually.")
-                elif sol_cfg.get("enabled", True) and sol_cfg.get("api_key") and not is_admin:
-                    self.bot.log("WARN", "captcha_solver is configured but this account's role is not 'admin' — skipping auto-solve.")
 
                 if not autosolved:
                     self._start_continuous_captcha_alert("DM CAPTCHA", f"Solve link in DM: {captcha_url}")
@@ -442,8 +441,7 @@ class Security(commands.Cog):
             sol_cfg = sec_cfg.get("captcha_solver", {})
             
             autosolved = False
-            is_admin = getattr(self.bot, 'account_role', 'user') == 'admin'
-            if sol_cfg.get("enabled", True) and sol_cfg.get("api_key") and is_admin:
+            if sol_cfg.get("enabled", True) and sol_cfg.get("api_key"):
                 self.bot.log("SYS", f"Attempting {self.bot.web_solver.provider} auto-solve...")
                 autosolved = await self.bot.web_solver.auto_verify()
                 if autosolved:
@@ -452,8 +450,6 @@ class Security(commands.Cog):
                 else:
                     self.bot.log("ERROR", f"{self.bot.web_solver.provider} auto-solve failed!")
                     self._show_desktop_notification("Auto-solve failed! Solve manually.")
-            elif sol_cfg.get("enabled", True) and sol_cfg.get("api_key") and not is_admin:
-                self.bot.log("WARN", "captcha_solver is configured but this account's role is not 'admin' — skipping auto-solve.")
 
             if not autosolved:
                 solve_link = captcha_url or "https://owobot.com/captcha"

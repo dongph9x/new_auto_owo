@@ -153,6 +153,11 @@ def logout():
     session.clear()
     return redirect(url_for('login'))
 
+@app.route('/api/session')
+@login_required
+def session_info():
+    return jsonify({'role': current_role()})
+
 @app.route('/api/accounts/list')
 @login_required
 def account_list():
@@ -403,14 +408,23 @@ def settings():
             if os.path.exists(config_path):
                 with open(config_path, 'r') as f:
                     data = json.load(f)
-                    return jsonify(protect_large_ints(data))
-
             elif account_id:
                 global_path = os.path.join(state.CONFIG_DIR, 'settings.json')
-                if os.path.exists(global_path):
-                    with open(global_path, 'r') as f:
-                        return jsonify(protect_large_ints(json.load(f)))
-            return jsonify({})
+                data = json.load(open(global_path)) if os.path.exists(global_path) else None
+            else:
+                data = None
+
+            if data is None:
+                return jsonify({})
+
+            # Redact captcha_solver (holds a paid API key) from the raw JSON for
+            # non-admin sessions too — the JS only hides the field, it doesn't stop
+            # the value being visible in the network tab otherwise.
+            if session_role != 'admin' and 'security' in data and 'captcha_solver' in data.get('security', {}):
+                data = json.loads(json.dumps(data))  # shallow-safe copy before mutating
+                del data['security']['captcha_solver']
+
+            return jsonify(protect_large_ints(data))
         except:
             return jsonify({})
 

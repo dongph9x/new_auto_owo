@@ -119,6 +119,406 @@
         {
             "id": 30,
             "quote": "Life is a gamble. You can get hurt, but people die in plane crashes, lose their arms and legs in car accidents; people die every day. Same with fighters: some die, some get hurt, some go on. You just don't let yourself believe it will happen to you."
+        },
+        {
+            "id": 31,
+            "quote": "Small steps every day still get you across the whole map eventually."
+        },
+        {
+            "id": 32,
+            "quote": "Nobody remembers the score, they remember the comeback."
+        },
+        {
+            "id": 33,
+            "quote": "A calm mind can carry a heavy load further than a strong one."
+        },
+        {
+            "id": 34,
+            "quote": "You don't need permission to start over."
+        },
+        {
+            "id": 35,
+            "quote": "The best time to plant a tree was years ago, the second best time is right now."
+        },
+        {
+            "id": 36,
+            "quote": "Discipline is just choosing between what you want now and what you want most."
+        },
+        {
+            "id": 37,
+            "quote": "Some days you win, some days you learn, either way you keep playing."
+        },
+        {
+            "id": 38,
+            "quote": "Slow progress is still progress, don't let anyone tell you otherwise."
+        },
+        {
+            "id": 39,
+            "quote": "A little consistency beats a lot of motivation."
+        },
+        {
+            "id": 40,
+            "quote": "Nothing worth having ever came with an easy patch note."
+        },
+        {
+            "id": 41,
+            "quote": "Rest when you need to, but never quit."
+        },
+        {
+            "id": 42,
+            "quote": "Confidence is quiet, insecurity is loud."
+        },
+        {
+            "id": 43,
+            "quote": "You are not behind, you are just on your own timeline."
+        },
+        {
+            "id": 44,
+            "quote": "The grind doesn't care how you feel about it, so might as well enjoy it."
+        },
+        {
+            "id": 45,
+            "quote": "Good things take time, great things take a little longer."
+        },
+        {
+            "id": 46,
+            "quote": "Every expert was once a beginner who refused to give up."
+        },
+        {
+            "id": 47,
+            "quote": "Patience is a bitter seed that bears the sweetest fruit."
+        },
+        {
+            "id": 48,
+            "quote": "The comeback is always stronger than the setback."
+        },
+        {
+            "id": 49,
+            "quote": "You can't pour from an empty cup, take care of yourself first."
+        },
+        {
+            "id": 50,
+            "quote": "Stress is just your body preparing you to handle something big."
+        },
+        {
+            "id": 51,
+            "quote": "Doubt kills more dreams than failure ever will."
+        },
+        {
+            "id": 52,
+            "quote": "Focus on the step in front of you, not the whole staircase."
+        },
+        {
+            "id": 53,
+            "quote": "A river cuts through rock not because of power, but persistence."
+        },
+        {
+            "id": 54,
+            "quote": "Growth is uncomfortable because you've never been this version of you before."
+        },
+        {
+            "id": 55,
+            "quote": "You miss every shot you don't take, so take the shot."
+        },
+        {
+            "id": 56,
+            "quote": "The only bad workout is the one that didn't happen."
+        },
+        {
+            "id": 57,
+            "quote": "Trust the process, even when the process is testing your patience."
+        },
+        {
+            "id": 58,
+            "quote": "Champions keep playing until they get it right."
+        },
+        {
+            "id": 59,
+            "quote": "Be so good they can't ignore you."
+        },
+        {
+            "id": 60,
+            "quote": "Everything you want is on the other side of consistency."
+        },
+        {
+            "id": 61,
+            "quote": "A good laugh and a long nap fix most problems."
+        },
+        {
+            "id": 62,
+            "quote": "It always seems impossible until it's done."
+        },
+        {
+            "id": 63,
+            "quote": "Your only limit is the one you set for yourself."
+        },
+        {
+            "id": 64,
+            "quote": "Progress over perfection, every single time."
+        },
+        {
+            "id": 65,
+            "quote": "Some people dream of success while others wake up and work for it."
+        },
+        {
+            "id": 66,
+            "quote": "The harder the battle, the sweeter the victory."
+        },
+        {
+            "id": 67,
+            "quote": "Keep your face toward the sunshine and shadows fall behind you."
+        },
+        {
+            "id": 68,
+            "quote": "You don't have to see the whole staircase, just take the first step."
+        },
+        {
+            "id": 69,
+            "quote": "A smooth sea never made a skilled sailor."
+        },
+        {
+            "id": 70,
+            "quote": "What feels like the end is often just a new beginning in disguise."
+        },
+        {
+            "id": 71,
+            "quote": "Hard work beats talent when talent doesn't work hard."
+        },
+        {
+            "id": 72,
+            "quote": "There is no elevator to success, you have to take the stairs."
+        },
+        {
+            "id": 73,
+            "quote": "Believe you can and you're already halfway there."
+        },
+        {
+            "id": 74,
+            "quote": "Fall seven times, stand up eight."
+        },
+        {
+            "id": 75,
+            "quote": "Great things never came from comfort zones."
+        },
+        {
+            "id": 76,
+            "quote": "Dream it, wish it, do it."
+        },
+        {
+            "id": 77,
+            "quote": "Success doesn't just find you, you have to go out and get it."
+        },
+        {
+            "id": 78,
+            "quote": "The key to success is to focus on goals, not obstacles."
+        },
+        {
+            "id": 79,
+            "quote": "Push yourself, because no one else is going to do it for you."
+        },
+        {
+            "id": 80,
+            "quote": "Don't stop when you're tired, stop when you're done."
+        },
+        {
+            "id": 81,
+            "quote": "Even a broken clock is right twice a day, keep trying."
+        },
+        {
+            "id": 82,
+            "quote": "You are stronger than you think and braver than you feel."
+        },
+        {
+            "id": 83,
+            "quote": "Not every day is good, but there's something good in every day."
+        },
+        {
+            "id": 84,
+            "quote": "Speak less, listen more, learn the most."
+        },
+        {
+            "id": 85,
+            "quote": "The tortoise wins not by speed, but by never quitting."
+        },
+        {
+            "id": 86,
+            "quote": "Worrying doesn't take away tomorrow's troubles, it takes away today's peace."
+        },
+        {
+            "id": 87,
+            "quote": "You can't control the wind, but you can adjust your sails."
+        },
+        {
+            "id": 88,
+            "quote": "A goal without a plan is just a wish."
+        },
+        {
+            "id": 89,
+            "quote": "Stay humble in victory and steady in defeat."
+        },
+        {
+            "id": 90,
+            "quote": "The comparison game has no winners."
+        },
+        {
+            "id": 91,
+            "quote": "One kind word can change someone's entire day."
+        },
+        {
+            "id": 92,
+            "quote": "You are the author of your own story, write it well."
+        },
+        {
+            "id": 93,
+            "quote": "Effort is never wasted, even when the result isn't what you hoped."
+        },
+        {
+            "id": 94,
+            "quote": "Silence is sometimes the loudest answer."
+        },
+        {
+            "id": 95,
+            "quote": "Better to light a candle than to curse the darkness."
+        },
+        {
+            "id": 96,
+            "quote": "A setback is just a setup for a comeback."
+        },
+        {
+            "id": 97,
+            "quote": "Keep good company, it rubs off on you."
+        },
+        {
+            "id": 98,
+            "quote": "Time heals what reason cannot."
+        },
+        {
+            "id": 99,
+            "quote": "The world belongs to those who show up."
+        },
+        {
+            "id": 100,
+            "quote": "Not all storms come to disrupt your life, some clear your path."
+        },
+        {
+            "id": 101,
+            "quote": "Do it scared if you have to, just do it."
+        },
+        {
+            "id": 102,
+            "quote": "Practice doesn't make perfect, practice makes progress."
+        },
+        {
+            "id": 103,
+            "quote": "You are allowed to be a masterpiece and a work in progress at once."
+        },
+        {
+            "id": 104,
+            "quote": "The best revenge is massive improvement."
+        },
+        {
+            "id": 105,
+            "quote": "A quiet mind is more valuable than a loud opinion."
+        },
+        {
+            "id": 106,
+            "quote": "Every master was once a disaster."
+        },
+        {
+            "id": 107,
+            "quote": "Kindness costs nothing but means everything."
+        },
+        {
+            "id": 108,
+            "quote": "Chase the vision, not the validation."
+        },
+        {
+            "id": 109,
+            "quote": "Your future self is watching you right now through memories."
+        },
+        {
+            "id": 110,
+            "quote": "Sometimes the smallest step in the right direction ends up being the biggest step of your life."
+        },
+        {
+            "id": 111,
+            "quote": "Don't wait for the perfect moment, take the moment and make it perfect."
+        },
+        {
+            "id": 112,
+            "quote": "Winners are not people who never fail, but people who never quit."
+        },
+        {
+            "id": 113,
+            "quote": "You get in life what you have the courage to ask for."
+        },
+        {
+            "id": 114,
+            "quote": "A calm sea never made a good sailor, neither did an easy life build strength."
+        },
+        {
+            "id": 115,
+            "quote": "There is no traffic jam on the extra mile."
+        },
+        {
+            "id": 116,
+            "quote": "Difficult roads often lead to beautiful destinations."
+        },
+        {
+            "id": 117,
+            "quote": "Be the energy you want to attract."
+        },
+        {
+            "id": 118,
+            "quote": "Peace begins with a smile."
+        },
+        {
+            "id": 119,
+            "quote": "You don't find willpower, you create it."
+        },
+        {
+            "id": 120,
+            "quote": "Whatever you are, be a good one."
+        },
+        {
+            "id": 121,
+            "quote": "A ship in harbor is safe, but that's not what ships are built for."
+        },
+        {
+            "id": 122,
+            "quote": "The struggle you're in today is developing the strength you need tomorrow."
+        },
+        {
+            "id": 123,
+            "quote": "Never let yesterday's disappointments overshadow tomorrow's dreams."
+        },
+        {
+            "id": 124,
+            "quote": "You are one decision away from a totally different life."
+        },
+        {
+            "id": 125,
+            "quote": "Motivation gets you started, habit keeps you going."
+        },
+        {
+            "id": 126,
+            "quote": "Little by little, a little becomes a lot."
+        },
+        {
+            "id": 127,
+            "quote": "The pain of discipline weighs less than the pain of regret."
+        },
+        {
+            "id": 128,
+            "quote": "Move the way fear tells you not to."
+        },
+        {
+            "id": 129,
+            "quote": "Do what is right, not what is easy."
+        },
+        {
+            "id": 130,
+            "quote": "You didn't come this far to only come this far."
         }
     ]
 }
