@@ -195,7 +195,8 @@
         "captcha_solver": {
             "enabled": false,
             "provider": "nopecha",
-            "api_key": ""
+            "api_key": "",
+            "max_retry_seconds": 300
         },
         "open_captcha_url_on_pc": true,
         "notifications": {

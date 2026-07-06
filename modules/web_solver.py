@@ -40,10 +40,8 @@ CAPTCHA_PROVIDERS = {
 }
 
 class WebSolver:
-    # Hard ceiling on total retry+poll time across ALL attempts combined, so a
-    # slow/stuck solver can't eat into the window still needed for manual solving.
-    # Same for every account, so it's a constant rather than a per-account setting.
-    MAX_RETRY_SECONDS = 300
+    # Fallback if not set in this account's config.
+    DEFAULT_MAX_RETRY_SECONDS = 300
 
     def __init__(self, bot):
         self.bot = bot
@@ -51,7 +49,12 @@ class WebSolver:
         self.api_key = cfg.get('api_key', '')
         self.enabled = cfg.get('enabled', True)
         self.provider = cfg.get('provider', 'nopecha')
-        self.max_retry_seconds = self.MAX_RETRY_SECONDS
+        # Hard ceiling on total retry+poll time across ALL attempts combined, so a
+        # slow/stuck solver can't eat into the window still needed for manual
+        # solving. Per-account: some accounts may have more/less manual-response
+        # time available, or need more patience for a provider's own internal
+        # queue/retry cycle before giving up.
+        self.max_retry_seconds = cfg.get('max_retry_seconds', self.DEFAULT_MAX_RETRY_SECONDS)
         self.browser_cfg = cfg.get('browser_config', {})
         self.site_key = "a6a1d5ce-612d-472d-8e37-7601408fbc09"
         self.auth_url = "https://discord.com/api/v9/oauth2/authorize?client_id=408785106942164992&response_type=code&redirect_uri=https://owobot.com/api/auth/discord/redirect&scope=identify guilds"
