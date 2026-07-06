@@ -343,11 +343,16 @@ class NeuraBot(commands.Bot):
         """Perform a deep merge of new_config and rebuild the command scheduler."""
         self._load_config()
         self._deep_merge(self.config, new_config)
-        
+
         core_cfg = self.config.get('core', {})
         self.prefix = core_cfg.get('prefix', 'owo ')
         if hasattr(self, '_connection'):
             self.command_prefix = self.prefix
+
+        # web_solver caches api_key/provider/enabled as plain attributes at construction
+        # time, so a live settings save (no restart) would otherwise keep using stale
+        # values — rebuild it here so captcha_solver changes apply immediately.
+        self.web_solver = setup_web_solver(self)
 
         self.cmd_states.clear()
         
