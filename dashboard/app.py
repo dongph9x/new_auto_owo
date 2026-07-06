@@ -10,7 +10,7 @@
 # along with NeuraSelf-UwU. If not, see <https://www.gnu.org/licenses/>.
 
 
-from flask import Flask, render_template, jsonify, request, session, redirect, url_for
+from flask import Flask, render_template, jsonify, request, session, redirect, url_for, g
 from functools import wraps
 import threading
 import time
@@ -44,13 +44,20 @@ def load_auth_config():
         try:
             with open(AUTH_FILE, 'r') as f:
                 cfg = json.load(f)
-                
+
+            dirty = False
             if cfg.get('secret_key') == "generate_a_random_long_secret_key_here_please":
-                new_secret = secrets.token_hex(32)
-                cfg['secret_key'] = new_secret
+                cfg['secret_key'] = secrets.token_hex(32)
+                dirty = True
+            # Bearer token for machine-to-machine callers (e.g. a separate slash-command
+            # control bot) that can't hold a browser session cookie.
+            if not cfg.get('control_api_token') or cfg.get('control_api_token', '').startswith('generate_a_random'):
+                cfg['control_api_token'] = secrets.token_hex(32)
+                dirty = True
+            if dirty:
                 with open(AUTH_FILE, 'w') as f:
                     json.dump(cfg, f, indent=4)
-                
+
             return cfg
         except:
             pass
@@ -70,6 +77,31 @@ def login_required(f):
         return f(*args, **kwargs)
     return decorated_function
 
+def check_api_token(req):
+    """Bearer-token auth for machine callers (e.g. a slash-command control bot)
+    that can't hold a browser session cookie."""
+    auth_header = req.headers.get('Authorization', '')
+    if not auth_header.startswith('Bearer '):
+        return False
+    token = auth_header[len('Bearer '):].strip()
+    cfg = load_auth_config() or {}
+    expected = cfg.get('control_api_token')
+    return bool(expected) and hmac.compare_digest(token, expected)
+
+def api_or_login_required(f):
+    """Like login_required, but also accepts a valid Bearer token (treated as
+    admin-equivalent access) and returns JSON 401 instead of redirecting to /login
+    — a redirect makes no sense for a non-browser caller."""
+    @wraps(f)
+    def decorated_function(*args, **kwargs):
+        if 'logged_in' in session:
+            return f(*args, **kwargs)
+        if check_api_token(request):
+            g.is_api_token = True
+            return f(*args, **kwargs)
+        return jsonify({'success': False, 'error': 'Unauthorized'}), 401
+    return decorated_function
+
 def check_credentials(cfg, username, password):
     """Checks the submitted login against the primary (admin) account and the
     optional secondary `user_login` account. Returns the matched role, or None."""
@@ -83,6 +115,12 @@ def check_credentials(cfg, username, password):
     return None
 
 def current_role():
+    # A valid control_api_token is a service-to-service credential, not tied to any
+    # dashboard login — treat it as admin-equivalent (it can already pause/resume
+    # any account by design; it shouldn't then be blocked by the role visibility
+    # filters meant for browser logins).
+    if getattr(g, 'is_api_token', False):
+        return 'admin'
     return session.get('role', 'user')
 
 def check_rate_limit(ip):
@@ -159,7 +197,7 @@ def session_info():
     return jsonify({'role': current_role()})
 
 @app.route('/api/accounts/list')
-@login_required
+@api_or_login_required
 def account_list():
     try:
         with open(os.path.join(state.CONFIG_DIR, 'accounts.json'), 'r') as f:
@@ -472,7 +510,7 @@ def test_security():
     return jsonify({'status': 'error', 'message': 'Security module not loaded'}), 500
 
 @app.route('/api/control', methods=['POST'])
-@login_required
+@api_or_login_required
 def control():
     data = request.json
     action = data.get('action')

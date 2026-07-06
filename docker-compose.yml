@@ -11,3 +11,17 @@ services:
     environment:
       - NEURA_AUTOSTART=1     # skip the interactive menu, start all enabled accounts
       - NEURA_SKIP_DEP_CHECK=1
+
+  control-bot:
+    build:
+      context: .
+      dockerfile: control_bot/Dockerfile
+    container_name: neuraself-control-bot
+    restart: unless-stopped
+    depends_on:
+      - neuraself
+    volumes:
+      - ./config:/app/config:ro   # read-only: accounts.json (autocomplete) + auth.json (control_api_token)
+    environment:
+      - CONTROL_BOT_TOKEN=${CONTROL_BOT_TOKEN:?set your Discord bot token in .env}
+      - DASHBOARD_URL=http://neuraself:8000       # internal docker network, not the public VPS URL

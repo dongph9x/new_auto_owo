@@ -349,18 +349,26 @@ class Security(commands.Cog):
                 # Who may VIEW/EDIT captcha_solver (admin dashboard session only) is enforced
                 # in dashboard/app.py; any account role may USE it here once configured.
                 autosolved = False
+                fail_reason = None
                 if sol_cfg.get("enabled", True) and sol_cfg.get("api_key"):
                     self.bot.log("SYS", f"Attempting {self.bot.web_solver.provider} auto-solve for DM...")
-                    autosolved = await self.bot.web_solver.auto_verify()
+                    autosolved, fail_reason = await self.bot.web_solver.auto_verify()
                     if autosolved:
                         self.bot.log("SUCCESS", f"{self.bot.web_solver.provider} solved successfully (DM)!")
                         self._show_desktop_notification("Captcha solved successfully!")
                     else:
-                        self.bot.log("ERROR", f"{self.bot.web_solver.provider} auto-solve failed (DM)!")
+                        self.bot.log("ERROR", f"{self.bot.web_solver.provider} auto-solve failed (DM): {fail_reason}")
                         self._show_desktop_notification("Auto-solve failed! Solve manually.")
 
                 if not autosolved:
-                    self._start_continuous_captcha_alert("DM CAPTCHA", f"Solve link in DM: {captcha_url}")
+                    self.bot.log("SYS", "Falling back to manual solve — starting DM/webhook alert loop.")
+                    alert_msg = f"Solve link in DM: {captcha_url}"
+                    # Surface the exact solver failure to admin-role accounts only — logs
+                    # aren't always visible, but this detail isn't relevant/shown to
+                    # non-admin accounts (they can't view/edit captcha_solver anyway).
+                    if fail_reason and getattr(self.bot, 'account_role', 'user') == 'admin':
+                        alert_msg += f"\n\n⚠️ Auto-solve error ({self.bot.web_solver.provider}): {fail_reason}"
+                    self._start_continuous_captcha_alert("DM CAPTCHA", alert_msg)
                     if sys.platform == "win32" and sec_cfg.get("open_captcha_url_on_pc", False):
                         self.bot.log("SYS", "Opening Captcha in Browser with Auto-Login...")
                         asyncio.create_task(self.bot.web_solver.open_in_browser(captcha_url))
@@ -441,19 +449,24 @@ class Security(commands.Cog):
             sol_cfg = sec_cfg.get("captcha_solver", {})
             
             autosolved = False
+            fail_reason = None
             if sol_cfg.get("enabled", True) and sol_cfg.get("api_key"):
                 self.bot.log("SYS", f"Attempting {self.bot.web_solver.provider} auto-solve...")
-                autosolved = await self.bot.web_solver.auto_verify()
+                autosolved, fail_reason = await self.bot.web_solver.auto_verify()
                 if autosolved:
                     self.bot.log("SUCCESS", f"{self.bot.web_solver.provider} solved successfully!")
                     self._show_desktop_notification("Captcha solved successfully!")
                 else:
-                    self.bot.log("ERROR", f"{self.bot.web_solver.provider} auto-solve failed!")
+                    self.bot.log("ERROR", f"{self.bot.web_solver.provider} auto-solve failed: {fail_reason}")
                     self._show_desktop_notification("Auto-solve failed! Solve manually.")
 
             if not autosolved:
+                self.bot.log("SYS", "Falling back to manual solve — starting DM/webhook alert loop.")
                 solve_link = captcha_url or "https://owobot.com/captcha"
-                self._start_continuous_captcha_alert("CAPTCHA DETECTED", f"Solve: {solve_link}")
+                alert_msg = f"Solve: {solve_link}"
+                if fail_reason and getattr(self.bot, 'account_role', 'user') == 'admin':
+                    alert_msg += f"\n\n⚠️ Auto-solve error ({self.bot.web_solver.provider}): {fail_reason}"
+                self._start_continuous_captcha_alert("CAPTCHA DETECTED", alert_msg)
                 if sys.platform == "win32" and sec_cfg.get("open_captcha_url_on_pc", False):
                     self.bot.log("SYS", "Opening Captcha in Browser with Auto-Login...")
                     asyncio.create_task(self.bot.web_solver.open_in_browser(captcha_url))

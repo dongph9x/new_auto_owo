@@ -40,12 +40,18 @@ CAPTCHA_PROVIDERS = {
 }
 
 class WebSolver:
+    # Hard ceiling on total retry+poll time across ALL attempts combined, so a
+    # slow/stuck solver can't eat into the window still needed for manual solving.
+    # Same for every account, so it's a constant rather than a per-account setting.
+    MAX_RETRY_SECONDS = 300
+
     def __init__(self, bot):
         self.bot = bot
         cfg = self.bot.config.get('security', {}).get('captcha_solver', {})
         self.api_key = cfg.get('api_key', '')
         self.enabled = cfg.get('enabled', True)
         self.provider = cfg.get('provider', 'nopecha')
+        self.max_retry_seconds = self.MAX_RETRY_SECONDS
         self.browser_cfg = cfg.get('browser_config', {})
         self.site_key = "a6a1d5ce-612d-472d-8e37-7601408fbc09"
         self.auth_url = "https://discord.com/api/v9/oauth2/authorize?client_id=408785106942164992&response_type=code&redirect_uri=https://owobot.com/api/auth/discord/redirect&scope=identify guilds"
@@ -70,11 +76,18 @@ class WebSolver:
                         return float(data.get("balance", 0)) if data.get("errorId") == 0 else 0
         except: return 0
 
-    async def solve_hcaptcha(self, retries=3):
-        """solves hcaptcha using the configured provider's API and returns the token"""
+    async def solve_hcaptcha(self, retries=3, deadline=None):
+        """Solves hcaptcha using the configured provider's API.
+        `deadline` (a time.time()-based timestamp) caps the TOTAL time spent across
+        ALL attempts + polling combined — defaults to self.max_retry_seconds from
+        now if not given, so a slow/stuck solver can't run past that budget.
+        Returns (token_or_None, last_error_reason) — reason is None on success."""
+        if deadline is None:
+            deadline = time.time() + self.max_retry_seconds
+
         prov = self._provider_cfg()
         if self.provider == "nopecha":
-            return await self._solve_hcaptcha_nopecha(prov, retries)
+            return await self._solve_hcaptcha_nopecha(prov, retries, deadline)
 
         create_url = f"{prov['base_url']}/createTask"
         result_url = f"{prov['base_url']}/getTaskResult"
@@ -90,34 +103,59 @@ class WebSolver:
         if self.provider == "yescaptcha":
             payload["softID"] = 94493
 
+        last_error = "unknown error"
         async with aiohttp.ClientSession() as session:
             for attempt in range(retries):
+                if time.time() >= deadline:
+                    last_error = f"gave up: exceeded the {self.max_retry_seconds}s retry budget"
+                    self.bot.log("WARN", f"{self.provider}: {last_error}")
+                    break
                 try:
-                    self.bot.log("SYS", f"Creating {self.provider} task (Attempt {attempt+1})...")
+                    self.bot.log("SYS", f"Creating {self.provider} task (Attempt {attempt+1}/{retries})...")
                     async with session.post(create_url, json=payload) as resp:
+                        if resp.status != 200:
+                            last_error = f"createTask returned HTTP {resp.status}"
+                            self.bot.log("ERROR", f"{self.provider}: {last_error}")
+                            continue
                         data = await resp.json()
 
                     if data.get("errorId") != 0:
-                        self.bot.log("ERROR", f"{self.provider} Error: {data.get('errorDescription')}")
+                        last_error = f"createTask error: {data.get('errorDescription') or data.get('errorId')}"
+                        self.bot.log("ERROR", f"{self.provider}: {last_error}")
                         continue
 
                     task_id = data.get("taskId")
-                    for _ in range(60):
+                    poll_outcome = "timeout"
+                    while time.time() < deadline:
                         await asyncio.sleep(2)
                         async with session.post(result_url, json={"clientKey": self.api_key, "taskId": task_id}) as res_resp:
                             res = await res_resp.json()
 
                         if res.get("status") == "ready":
-                            return res["solution"]["gRecaptchaResponse"]
-                        if res.get("errorId") != 0: break
+                            return res["solution"]["gRecaptchaResponse"], None
+                        if res.get("errorId") != 0:
+                            last_error = f"getTaskResult error: {res.get('errorDescription') or res.get('errorId')}"
+                            self.bot.log("ERROR", f"{self.provider}: {last_error}")
+                            poll_outcome = "error"
+                            break
+                    if poll_outcome == "timeout":
+                        last_error = f"gave up: exceeded the {self.max_retry_seconds}s retry budget while polling"
+                        self.bot.log("WARN", f"{self.provider}: {last_error}")
+                        break
                 except Exception as e:
-                    self.bot.log("ERROR", f"Solver task failed: {e}")
-            return None
+                    last_error = str(e)
+                    self.bot.log("ERROR", f"{self.provider}: solver task failed: {last_error}")
+            return None, last_error
 
-    async def _solve_hcaptcha_nopecha(self, prov, retries=3):
+    async def _solve_hcaptcha_nopecha(self, prov, retries=3, deadline=None):
         """nopecha's Token API: POST /token/ returns a job id in `data`, then GET
         /token/?id=<job_id> is polled until `data` holds the solved token (error 14
-        means "still processing", any other error is a hard failure for that job)."""
+        means "still processing", any other error is a hard failure for that job).
+        `deadline` caps total time across all attempts (see solve_hcaptcha).
+        Returns (token_or_None, last_error_reason)."""
+        if deadline is None:
+            deadline = time.time() + self.max_retry_seconds
+
         url = f"{prov['base_url']}/token/"
         payload = {
             "key": self.api_key,
@@ -126,42 +164,64 @@ class WebSolver:
             "url": "https://owobot.com",
         }
 
+        last_error = "unknown error"
         async with aiohttp.ClientSession() as session:
             for attempt in range(retries):
+                if time.time() >= deadline:
+                    last_error = f"gave up: exceeded the {self.max_retry_seconds}s retry budget"
+                    self.bot.log("WARN", f"nopecha: {last_error}")
+                    break
                 try:
-                    self.bot.log("SYS", f"Creating nopecha task (Attempt {attempt+1})...")
+                    self.bot.log("SYS", f"Creating nopecha task (Attempt {attempt+1}/{retries})...")
                     async with session.post(url, json=payload) as resp:
+                        if resp.status != 200:
+                            last_error = f"token/ create returned HTTP {resp.status}"
+                            self.bot.log("ERROR", f"nopecha: {last_error}")
+                            continue
                         data = await resp.json()
 
                     job_id = data.get("data")
                     if not job_id:
-                        self.bot.log("ERROR", f"nopecha Error: {data.get('message', data)}")
+                        last_error = f"task rejected: {data.get('message') or data.get('error') or data}"
+                        self.bot.log("ERROR", f"nopecha: {last_error}")
                         continue
 
-                    for _ in range(60):
+                    poll_outcome = "timeout"
+                    while time.time() < deadline:
                         await asyncio.sleep(2)
                         async with session.get(url, params={"key": self.api_key, "id": job_id}) as res_resp:
                             res = await res_resp.json()
 
                         if res.get("data"):
-                            return res["data"]
+                            return res["data"], None
                         if res.get("error") is not None and res.get("error") != 14:
-                            break  # anything other than "job incomplete" is a hard failure
+                            last_error = f"job failed: error {res.get('error')} - {res.get('message', '')}".strip(" -")
+                            self.bot.log("ERROR", f"nopecha: {last_error}")
+                            poll_outcome = "error"
+                            break
+                    if poll_outcome == "timeout":
+                        last_error = f"gave up: exceeded the {self.max_retry_seconds}s retry budget while polling"
+                        self.bot.log("WARN", f"nopecha: {last_error}")
+                        break
                 except Exception as e:
-                    self.bot.log("ERROR", f"Solver task failed: {e}")
-            return None
+                    last_error = str(e)
+                    self.bot.log("ERROR", f"nopecha: solver task failed: {last_error}")
+            return None, last_error
 
     async def auto_verify(self, tries=3):
-
+        """Returns (success: bool, reason: str|None) — reason is always populated on
+        failure so the caller can log/report exactly why auto-solve didn't work."""
         if not self.api_key:
-            self.bot.log("ERROR", f"{self.provider} API key missing in settings.")
-            return False
+            reason = "API key missing in settings"
+            self.bot.log("ERROR", f"{self.provider}: {reason}.")
+            return False, reason
 
         balance = await self.get_balance()
         min_balance = self._provider_cfg()["min_balance"]
         if balance < min_balance:
-            self.bot.log("ERROR", f"{self.provider} balance too low: {balance}")
-            return False
+            reason = f"balance too low ({balance} < {min_balance} required)"
+            self.bot.log("ERROR", f"{self.provider}: {reason}")
+            return False, reason
 
         headers = {
             "Authorization": self.bot.token,
@@ -178,24 +238,33 @@ class WebSolver:
                     "location_context": {"guild_id": "10000", "channel_id": "10000", "channel_type": 10000}
                 }
                 async with session.post(self.auth_url, json=auth_payload) as resp:
-                    if resp.status != 200: return False
+                    if resp.status != 200:
+                        reason = f"Discord OAuth authorize failed (HTTP {resp.status})"
+                        self.bot.log("ERROR", f"{self.provider}: {reason}")
+                        return False, reason
                     auth_data = await resp.json()
                     redirect_url = auth_data.get("location")
 
                 if redirect_url:
                     async with session.get(redirect_url) as r: pass
 
-
-                solution = await self.solve_hcaptcha(tries)
-                if not solution: return False
+                solution, solve_reason = await self.solve_hcaptcha(tries)
+                if not solution:
+                    reason = f"failed to solve after {tries} attempt(s): {solve_reason}"
+                    return False, reason
 
                 verify_url = "https://owobot.com/api/captcha/verify"
                 verify_payload = {"token": solution}
                 async with session.post(verify_url, json=verify_payload, headers={"Referer": "https://owobot.com/captcha", "Origin": "https://owobot.com"}) as v_resp:
-                    return v_resp.status == 200
+                    if v_resp.status == 200:
+                        return True, None
+                    reason = f"owobot verify endpoint returned HTTP {v_resp.status}"
+                    self.bot.log("ERROR", f"{self.provider}: {reason}")
+                    return False, reason
             except Exception as e:
-                self.bot.log("ERROR", f"Auto-verification failed: {e}")
-                return False
+                reason = str(e)
+                self.bot.log("ERROR", f"{self.provider}: auto-verification failed: {reason}")
+                return False, reason
 
     async def open_in_browser(self, captcha_url=None):
         """gets oauth redirect url and opens it in browser for auto-login/manual solve"""

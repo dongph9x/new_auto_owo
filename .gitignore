@@ -58,8 +58,10 @@ env/
 ENV/
 .venv/
 .ENV/
+.env
 .env/
 .env.*
+!.env.example
 .virtualenv/
 
 # ===============================
