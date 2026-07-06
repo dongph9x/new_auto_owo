@@ -31,29 +31,32 @@ class NeuraHuman:
         stealth_cfg = bot.config.get('stealth', {})
         hb_cfg = stealth_cfg.get('human_break', {})
         hb_enabled = hb_cfg.get('enabled', True)
-        hb_duration = hb_cfg.get('duration_min', 10) * 60
         hb_interval = hb_cfg.get('interval_min', 45) * 60
 
         runtime = time.time() - NeuraHuman.last_break_check
-        if hb_enabled and runtime > hb_interval: 
+        if hb_enabled and runtime > hb_interval:
             async with NeuraHuman.break_lock:
                 if time.time() - NeuraHuman.last_break_check > hb_interval and not NeuraHuman.is_on_break:
                     NeuraHuman.is_on_break = True
                     start_break_time = time.time()
-                    bot.log("STEALTH", f"Pausing for {int(hb_duration/60)}mins for human behaviour (Break Time)")
+                    # Randomize the break length once per break (1min .. duration_min) instead
+                    # of always taking the full configured duration — re-rolling this every poll
+                    # tick would make the break length drift, so it's picked once up front.
+                    max_duration_min = max(1, hb_cfg.get('duration_min', 10))
+                    chosen_duration = random.uniform(1, max_duration_min) * 60
+                    bot.log("STEALTH", f"Pausing for {chosen_duration/60:.1f}mins for human behaviour (Break Time)")
                     try:
                         while NeuraHuman.is_on_break:
                             curr_stealth = bot.config.get('stealth', {})
                             curr_hb = curr_stealth.get('human_break', {})
-                            
+
                             if not curr_hb.get('enabled', True):
                                 bot.log("STEALTH", "Break interrupted: Human Break disabled in settings.")
                                 break
-                            
-                            curr_duration = curr_hb.get('duration_min', 10) * 60
-                            if time.time() - start_break_time >= curr_duration:
+
+                            if time.time() - start_break_time >= chosen_duration:
                                 break
-                                
+
                             await asyncio.sleep(1)
                     finally:
                         NeuraHuman.last_break_check = time.time()

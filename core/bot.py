@@ -73,6 +73,7 @@ class NeuraBot(commands.Bot):
         self.identity = IdentityManager(self)
         self.modules = {}
         self.active = True
+        self._paused_fallback = False  # used only before self.user exists (pre-login)
         self.paused = False
         self.warmup_until = time.time() + 10
         self.throttle_until = 0.0
@@ -307,6 +308,23 @@ class NeuraBot(commands.Bot):
             state.account_stats[uid] = state.get_empty_stats()
             state.account_stats[uid]['username'] = self.username
         return state.account_stats[uid]
+
+    @property
+    def paused(self):
+        """Backed by per-account stats (persisted to data/stats.json) instead of a
+        plain in-memory attribute, so a Docker rebuild / process restart doesn't
+        silently un-pause an account that was stopped for a ban/captcha."""
+        if hasattr(self, '_connection') and self.user:
+            return self.stats.get('paused', False)
+        return self._paused_fallback
+
+    @paused.setter
+    def paused(self, value):
+        if hasattr(self, '_connection') and self.user:
+            self.stats['paused'] = value
+            state.save_account_stats()
+        else:
+            self._paused_fallback = value
 
     def log(self, log_type, message):
         neura_logger.log(self, log_type, message)
