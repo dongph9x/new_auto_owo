@@ -62,10 +62,15 @@ def init_db():
             streak INTEGER,        -- win streak at the moment of loss
             uuid TEXT,
             battle_link TEXT,
-            raw_json TEXT          -- full structured battle data from owobot's API
+            log_text TEXT,         -- human-readable battle text from Discord (teams/weapons/turns)
+            raw_json TEXT          -- full structured replay from logs.owobot.com (tokenised v2)
         )
     ''')
     c.execute('CREATE INDEX IF NOT EXISTS idx_battles_account ON battles(account_id, id)')
+    # Add log_text to DBs created before this column existed.
+    cols = [r[1] for r in c.execute('PRAGMA table_info(battles)').fetchall()]
+    if 'log_text' not in cols:
+        c.execute('ALTER TABLE battles ADD COLUMN log_text TEXT')
     conn.commit()
     conn.close()
 
@@ -268,9 +273,10 @@ def get_analytics_data(start_date=None, end_date=None):
     }
 
 
-def record_battle(account_id, result, streak=None, uuid=None, battle_link=None, raw_json=None):
-    """Persist one battle. raw_json should be a JSON-serialisable object (the structured
-    data from owobot's /api/battle-log) or None if it couldn't be fetched."""
+def record_battle(account_id, result, streak=None, uuid=None, battle_link=None, raw_json=None, log_text=None):
+    """Persist one battle. log_text is the human-readable battle message from Discord
+    (team/weapon/turns) — the primary source for AI analysis. raw_json is the structured
+    replay from logs.owobot.com (tokenised v2) or None if it couldn't be fetched."""
     conn = get_db()
     c = conn.cursor()
     timestamp = datetime.now().strftime("%Y-%m-%d %H:%M:%S")
@@ -278,9 +284,9 @@ def record_battle(account_id, result, streak=None, uuid=None, battle_link=None, 
     if raw_json is not None:
         raw_str = raw_json if isinstance(raw_json, str) else json.dumps(raw_json)
     c.execute('''
-        INSERT INTO battles (account_id, timestamp, result, streak, uuid, battle_link, raw_json)
-        VALUES (?, ?, ?, ?, ?, ?, ?)
-    ''', (str(account_id), timestamp, result, streak, uuid, battle_link, raw_str))
+        INSERT INTO battles (account_id, timestamp, result, streak, uuid, battle_link, log_text, raw_json)
+        VALUES (?, ?, ?, ?, ?, ?, ?, ?)
+    ''', (str(account_id), timestamp, result, streak, uuid, battle_link, log_text, raw_str))
     conn.commit()
     conn.close()
 
@@ -289,7 +295,7 @@ def get_recent_battles(account_id, limit=20, result=None):
     """Recent battles for an account, newest first. Pass result='lose' to filter."""
     conn = get_db()
     c = conn.cursor()
-    query = 'SELECT id, timestamp, result, streak, uuid, battle_link, raw_json FROM battles WHERE account_id = ?'
+    query = 'SELECT id, timestamp, result, streak, uuid, battle_link, raw_json, log_text FROM battles WHERE account_id = ?'
     params = [str(account_id)]
     if result:
         query += ' AND result = ?'
@@ -311,7 +317,7 @@ def get_battles_by_ids(account_id, battle_ids):
     c = conn.cursor()
     placeholders = ','.join('?' * len(ids))
     query = (
-        f'SELECT id, timestamp, result, streak, uuid, battle_link, raw_json '
+        f'SELECT id, timestamp, result, streak, uuid, battle_link, raw_json, log_text '
         f'FROM battles WHERE account_id = ? AND id IN ({placeholders}) ORDER BY id DESC'
     )
     c.execute(query, [str(account_id)] + ids)
@@ -329,6 +335,7 @@ def _battle_row_to_dict(row):
         "uuid": row[4],
         "battle_link": row[5],
         "raw_json": json.loads(row[6]) if row[6] else None,
+        "log_text": row[7] if len(row) > 7 else None,
     }
 
 

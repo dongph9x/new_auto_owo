@@ -152,11 +152,24 @@ class BattleLogger(commands.Cog):
                 uuid=uuid,
                 battle_link=battle_link,
                 raw_json=raw_json,
+                log_text=self._clean_log_text(text),
             )
             detail = "with detail" if raw_json is not None else "no detail"
             self.bot.log("INFO", f"BattleLog: recorded loss (streak {streak}, {detail}).")
         except Exception as e:
             self.bot.log("ERROR", f"BattleLog: failed to record battle: {e}")
+
+    def _clean_log_text(self, text):
+        """Trim the battle message down to the human-readable part worth handing to the
+        AI: drop the '[Log Link](...)' markdown and any bare owobot URLs, keep the
+        'X goes into battle / You lost in N turns / team & weapon lines'."""
+        if not text:
+            return None
+        # Remove masked markdown links like [Log Link](https://...) and bare urls.
+        cleaned = re.sub(r'\[[^\]]*\]\(https?://[^)]+\)', '', text)
+        cleaned = re.sub(r'https?://\S+', '', cleaned)
+        lines = [ln.strip() for ln in cleaned.splitlines() if ln.strip()]
+        return "\n".join(lines) or None
 
     def _full_text(self, message):
         parts = [message.content or ""]

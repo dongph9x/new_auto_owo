@@ -716,34 +716,51 @@ def _parse_battle_ids(raw):
 
 
 def _battle_analysis_prompt(battles, counts, *, specific=False):
-    """Build the analysis prompt from raw battle-log JSON (schema-agnostic)."""
-    detailed = [b for b in battles if b.get('raw_json')]
-    payload = detailed[:15]
+    """Build the analysis prompt. Prefer the human-readable battle text captured from
+    Discord (log_text: teams / weapons / turns) since it's what the AI can actually reason
+    about; fall back to raw_json only when a battle has no log_text (older rows)."""
+    usable = [b for b in battles if b.get('log_text') or b.get('raw_json')]
+    payload = usable[:15]
     if not payload:
         if specific:
-            return None, "Selected battle log(s) have no detailed JSON — only losses are auto-fetched by default."
-        return None, "No losses with detailed battle data yet — thua vài trận có link log trước."
+            return None, "Selected battle log(s) have no stored data yet — chỉ các trận thua mới được ghi log."
+        return None, "No losses with battle data yet — thua vài trận trước đã nhé."
 
     import json as _json
-    labelled = [{"log_id": b.get("id"), "result": b.get("result"), "data": b["raw_json"]} for b in payload]
+    labelled = []
+    for b in payload:
+        entry = {"log_id": b.get("id"), "result": b.get("result"), "streak": b.get("streak")}
+        if b.get('log_text'):
+            entry["text"] = b["log_text"]
+        else:
+            entry["data"] = b["raw_json"]
+        labelled.append(entry)
     battles_text = _json.dumps(labelled, ensure_ascii=False)
     scope = (
-        "Below is the raw JSON of the specific battle log(s) you asked for (owobot battle-log API)."
+        "Below are the specific battle log(s) you asked for."
         if specific else
-        "Below is the raw JSON of recent LOST battles from owobot's battle-log API."
+        "Below are recent LOST battles."
     )
     prompt = (
         "You are analysing OwO Discord bot battles to help the player improve their build. "
         f"Overall record: {counts.get('wins',0)} wins / {counts.get('loses',0)} losses "
         f"(win rate {counts.get('win_rate')}%). "
-        f"{scope} "
-        "Figure out the schema yourself, then tell me concisely (in Vietnamese):\n"
-        "1. The most common reasons these losses happened (level gaps, weapon/gear, team "
-        "composition, enemy patterns).\n"
-        "2. Concrete build changes to reduce losses.\n"
+        f"{scope} Each entry has a 'text' field = the battle message showing your team and "
+        "the enemy team with each unit's level, pet emoji, and weapon/gear "
+        "(e.g. 'L.30 - mythic/mcrune/ewgen' means level 30 with those gear pieces; "
+        "'no weapon' means an un-equipped slot). A few older entries may instead have a "
+        "'data' field with raw tokenised JSON — do your best with it.\n\n"
+        "Answer in Vietnamese, BUT keep every OwO game proper noun in its original form — "
+        "do NOT translate pet names, skill names, weapon/gear names, or emoji codes "
+        "(e.g. keep 'mythic', 'mcrune', 'ewgen', ':bee:', 'no weapon' exactly as written). "
+        "Only the explanation prose is Vietnamese; the game terms stay in English.\n"
+        "Cover concisely:\n"
+        "1. The most common reasons these losses happened (level gaps, missing/weak weapons, "
+        "team composition, enemy patterns).\n"
+        "2. Concrete build changes to reduce losses (which slots to gear up, level targets).\n"
         "3. Any striking patterns across the losses.\n"
         "Keep it practical and short.\n\n"
-        f"BATTLES JSON:\n{battles_text}"
+        f"BATTLES:\n{battles_text}"
     )
     return prompt, None
 
