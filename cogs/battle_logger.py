@@ -115,8 +115,10 @@ class BattleLogger(commands.Cog):
         # accounts share a channel (e.g. two of the user's bots farming each other), both
         # bots see the exact same message, so the uuid alone can't tell them apart.
         # Always require the identity check, or both accounts end up recording the same
-        # battle as their own loss.
-        if not self.bot.is_message_for_me(message):
+        # battle as their own loss. Match against `text` (our flattened _full_text) rather
+        # than is_message_for_me(message): OwO's battle results are Components V2 messages
+        # whose text lives in message.components, which is_message_for_me can't see.
+        if not self.bot.identity.text_is_for_me(text, message):
             if cfg.get('debug', False):
                 self.bot.log("DEBUG", "BattleLog: loss text but not-for-me — skipping.")
             return
