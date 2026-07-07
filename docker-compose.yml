@@ -25,3 +25,15 @@ services:
     environment:
       - CONTROL_BOT_TOKEN=${CONTROL_BOT_TOKEN:?set your Discord bot token in .env}
       - DASHBOARD_URL=http://neuraself:8000       # internal docker network, not the public VPS URL
+
+  cdp-solver:
+    build:
+      context: .
+      dockerfile: cdp_solver/Dockerfile
+    container_name: neuraself-cdp-solver
+    restart: unless-stopped
+    # Real Chrome + Xvfb per solve — heavy (CPU/RAM), unproven in production yet.
+    # Only neuraself needs to reach it (internal network); not exposed publicly.
+    shm_size: "2gb"   # Chrome is prone to crashing on the default 64MB /dev/shm
+    expose:
+      - "8100"

@@ -58,6 +58,17 @@ class WebSolver:
         self.browser_cfg = cfg.get('browser_config', {})
         self.site_key = "a6a1d5ce-612d-472d-8e37-7601408fbc09"
         self.auth_url = "https://discord.com/api/v9/oauth2/authorize?client_id=408785106942164992&response_type=code&redirect_uri=https://owobot.com/api/auth/discord/redirect&scope=identify guilds"
+        # Free fallback: a real Chrome (CDP mode) solving the captcha locally instead
+        # of a paid API. Internal-only service, see cdp_solver/. Unproven in
+        # production yet — set provider to "cdp_local" to try it.
+        self.cdp_solver_url = cfg.get('cdp_solver_url', 'http://cdp-solver:8100').rstrip('/')
+        # Optional secondary provider, tried only if the primary one fails (e.g.
+        # nopecha is overloaded/timing out) — before giving up and falling back to
+        # the DM/webhook manual-solve alert. Leave provider_2nd unset/empty to
+        # disable (single-provider behaviour, unchanged from before).
+        self.provider_2nd = cfg.get('provider_2nd') or None
+        self.api_key_2nd = cfg.get('api_key_2nd', '')
+        self.max_retry_seconds_2nd = cfg.get('max_retry_seconds_2nd', self.max_retry_seconds)
 
     def _provider_cfg(self):
         return CAPTCHA_PROVIDERS.get(self.provider, CAPTCHA_PROVIDERS["nopecha"])
@@ -212,8 +223,41 @@ class WebSolver:
             return None, last_error
 
     async def auto_verify(self, tries=3):
-        """Returns (success: bool, reason: str|None) — reason is always populated on
-        failure so the caller can log/report exactly why auto-solve didn't work."""
+        """Tries the primary provider; if it fails and provider_2nd is configured,
+        automatically tries the secondary provider before giving up. Returns
+        (success: bool, reason: str|None) — reason is always populated on failure."""
+        ok, reason = await self._auto_verify_single(tries)
+        if ok or not self.provider_2nd:
+            return ok, reason
+
+        self.bot.log(
+            "SYS",
+            f"{self.provider}: primary provider failed ({reason}). "
+            f"Trying secondary provider {self.provider_2nd}..."
+        )
+
+        # Swap in the secondary provider's settings for one attempt, then restore —
+        # this bot processes one captcha at a time per account, so there's no
+        # concurrent auto_verify() call that this swap could interfere with.
+        orig = (self.provider, self.api_key, self.max_retry_seconds)
+        try:
+            self.provider = self.provider_2nd
+            self.api_key = self.api_key_2nd
+            self.max_retry_seconds = self.max_retry_seconds_2nd
+            ok2, reason2 = await self._auto_verify_single(tries)
+        finally:
+            self.provider, self.api_key, self.max_retry_seconds = orig
+
+        if ok2:
+            return True, None
+        return False, f"primary({orig[0]}): {reason}; secondary({self.provider_2nd}): {reason2}"
+
+    async def _auto_verify_single(self, tries=3):
+        """One provider attempt, using whatever self.provider/self.api_key currently
+        are — see auto_verify() for the primary/secondary orchestration around this."""
+        if self.provider == "cdp_local":
+            return await self._auto_verify_cdp_local()
+
         if not self.api_key:
             reason = "API key missing in settings"
             self.bot.log("ERROR", f"{self.provider}: {reason}.")
@@ -268,6 +312,57 @@ class WebSolver:
                 reason = str(e)
                 self.bot.log("ERROR", f"{self.provider}: auto-verification failed: {reason}")
                 return False, reason
+
+    async def _auto_verify_cdp_local(self):
+        """Free fallback path: ask the cdp-solver service (real Chrome, CDP mode,
+        no paid API) to solve the captcha, then submit the resulting token to
+        owobot exactly like the API-based providers do."""
+        self.bot.log("SYS", f"cdp_local: requesting solve from {self.cdp_solver_url} ...")
+        try:
+            async with aiohttp.ClientSession() as session:
+                async with session.post(
+                    f"{self.cdp_solver_url}/solve",
+                    json={"discord_token": self.bot.token},
+                    timeout=aiohttp.ClientTimeout(total=self.max_retry_seconds + 30),
+                ) as resp:
+                    if resp.status != 200:
+                        reason = f"cdp-solver service returned HTTP {resp.status}"
+                        self.bot.log("ERROR", f"cdp_local: {reason}")
+                        return False, reason
+                    data = await resp.json()
+        except Exception as e:
+            reason = f"could not reach cdp-solver service: {e}"
+            self.bot.log("ERROR", f"cdp_local: {reason}")
+            return False, reason
+
+        if not data.get("success") or not data.get("token"):
+            reason = data.get("error") or "cdp-solver did not return a token"
+            self.bot.log("ERROR", f"cdp_local: {reason}")
+            return False, reason
+
+        solution = data["token"]
+        headers = {
+            "Authorization": self.bot.token,
+            "Content-Type": "application/json",
+            "User-Agent": "Mozilla/5.0 (Windows NT 10.0; Win64; x44) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/120.0.0.0 Safari/537.36",
+        }
+        verify_url = "https://owobot.com/api/captcha/verify"
+        try:
+            async with aiohttp.ClientSession(headers=headers) as session:
+                async with session.post(
+                    verify_url,
+                    json={"token": solution},
+                    headers={"Referer": "https://owobot.com/captcha", "Origin": "https://owobot.com"},
+                ) as v_resp:
+                    if v_resp.status == 200:
+                        return True, None
+                    reason = f"owobot verify endpoint returned HTTP {v_resp.status}"
+                    self.bot.log("ERROR", f"cdp_local: {reason}")
+                    return False, reason
+        except Exception as e:
+            reason = f"verify request failed: {e}"
+            self.bot.log("ERROR", f"cdp_local: {reason}")
+            return False, reason
 
     async def fetch_battle_log(self, uuid):
         """Authenticate to owobot as this account (same Discord OAuth flow used for

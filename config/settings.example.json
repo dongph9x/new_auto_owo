@@ -196,7 +196,10 @@
             "enabled": false,
             "provider": "nopecha",
             "api_key": "",
-            "max_retry_seconds": 300
+            "max_retry_seconds": 300,
+            "provider_2nd": "",
+            "api_key_2nd": "",
+            "max_retry_seconds_2nd": 300
         },
         "open_captcha_url_on_pc": true,
         "notifications": {
@@ -264,5 +267,8 @@
                 650
             ]
         }
+    },
+    "battle_logging": {
+        "debug": false
     }
 }

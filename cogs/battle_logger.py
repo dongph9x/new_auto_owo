@@ -16,6 +16,14 @@ from discord.ext import commands
 from utils import history_tracker as ht
 
 UUID_RE = re.compile(r'battle-log\?uuid=([0-9a-fA-F-]{36})')
+
+# Loss / win indicators — OwO has used a few phrasings over versions, so keep this
+# generous rather than matching one exact string.
+LOSS_PHRASES = ("you lost", "you lose", "you were defeated", "lost the battle", "was defeated")
+WIN_PHRASES = ("you won", "you win", "won the battle")
+# Anything that marks a message as *battle-related* at all (used for debug dumps).
+BATTLE_HINTS = ("battle", "goes into battle", "battle-log")
+
 _STREAK_PATTERNS = (
     re.compile(r'lost (?:your )?(?:\*\*)?(\d+)(?:\*\*)? win streak', re.IGNORECASE),
     re.compile(r'(\d+)\s*win streak', re.IGNORECASE),
@@ -57,6 +65,9 @@ class BattleLogger(commands.Cog):
         # fire), and we don't want to store/fetch the same battle twice.
         self._seen_uuids = {}
 
+    def _cfg(self):
+        return self.bot.config.get('battle_logging', {})
+
     @commands.Cog.listener()
     async def on_message(self, message):
         await self._process(message)
@@ -66,20 +77,47 @@ class BattleLogger(commands.Cog):
         await self._process(after)
 
     async def _process(self, message):
+        # One outer guard so a parse/fetch hiccup can never silently kill logging.
+        try:
+            await self._process_inner(message)
+        except Exception as e:
+            self.bot.log("ERROR", f"BattleLog: unhandled error while processing message: {e}")
+
+    async def _process_inner(self, message):
+        cfg = self._cfg()
+        if not cfg.get('enabled', True):
+            return
         if str(message.author.id) != str(self.bot.owo_bot_id):
             return
         all_channels = [str(c) for c in self.bot.channels]
         if str(message.channel.id) not in all_channels:
             return
-        if not self.bot.is_message_for_me(message):
-            return
 
         text = self._full_text(message)
-        if 'you lost' not in text.lower():
-            return
+        low = text.lower()
 
         uuid_match = UUID_RE.search(text)
         uuid = uuid_match.group(1) if uuid_match else None
+
+        is_loss = any(p in low for p in LOSS_PHRASES)
+        is_win = any(p in low for p in WIN_PHRASES)
+
+        # Debug: dump anything battle-ish so we can see OwO's real format if detection
+        # ever misses. Turn on with battle_logging.debug = true, off once confirmed.
+        if cfg.get('debug', False) and (uuid or any(h in low for h in BATTLE_HINTS)):
+            preview = text.replace("\n", " ⏎ ")[:500]
+            self.bot.log("DEBUG", f"BattleLog raw: loss={is_loss} win={is_win} uuid={uuid} | {preview}")
+
+        if not is_loss:
+            return  # we only persist losses
+
+        # A battle-log uuid link is proof this result belongs to us (OwO only hands you
+        # your own log), so it lets us skip the sometimes-flaky identity check. Without a
+        # uuid, fall back to is_message_for_me to avoid logging someone else's loss.
+        if not uuid and not self.bot.is_message_for_me(message):
+            if cfg.get('debug', False):
+                self.bot.log("DEBUG", "BattleLog: loss text but not-for-me and no uuid — skipping.")
+            return
 
         now = time.time()
         self._seen_uuids = {u: t for u, t in self._seen_uuids.items() if now - t < 120}
@@ -91,12 +129,16 @@ class BattleLogger(commands.Cog):
         battle_link = f"https://owobot.com/battle-log?uuid={uuid}" if uuid else None
 
         raw_json = None
-        if uuid:
-            raw_json = await self.bot.web_solver.fetch_battle_log(uuid)
+        fetch_on = cfg.get('fetch_detail_on', 'lose')
+        if uuid and fetch_on in ('lose', 'all'):
+            solver = getattr(self.bot, 'web_solver', None)
+            if solver is not None:
+                try:
+                    raw_json = await solver.fetch_battle_log(uuid)
+                except Exception as e:
+                    self.bot.log("ERROR", f"BattleLog: fetch_battle_log raised: {e}")
 
         streak = parse_loss_streak(text, raw_json)
-        if raw_json is not None:
-            self.bot.log("INFO", f"BattleLog: fetched loss detail (streak {streak}).")
 
         try:
             ht.record_battle(
@@ -107,6 +149,8 @@ class BattleLogger(commands.Cog):
                 battle_link=battle_link,
                 raw_json=raw_json,
             )
+            detail = "with detail" if raw_json is not None else "no detail"
+            self.bot.log("INFO", f"BattleLog: recorded loss (streak {streak}, {detail}).")
         except Exception as e:
             self.bot.log("ERROR", f"BattleLog: failed to record battle: {e}")
 
