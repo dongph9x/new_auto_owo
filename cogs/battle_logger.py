@@ -111,12 +111,14 @@ class BattleLogger(commands.Cog):
         if not is_loss:
             return  # we only persist losses
 
-        # A battle-log uuid link is proof this result belongs to us (OwO only hands you
-        # your own log), so it lets us skip the sometimes-flaky identity check. Without a
-        # uuid, fall back to is_message_for_me to avoid logging someone else's loss.
-        if not uuid and not self.bot.is_message_for_me(message):
+        # A uuid link proves *someone* got a battle-log, but not necessarily us: when two
+        # accounts share a channel (e.g. two of the user's bots farming each other), both
+        # bots see the exact same message, so the uuid alone can't tell them apart.
+        # Always require the identity check, or both accounts end up recording the same
+        # battle as their own loss.
+        if not self.bot.is_message_for_me(message):
             if cfg.get('debug', False):
-                self.bot.log("DEBUG", "BattleLog: loss text but not-for-me and no uuid — skipping.")
+                self.bot.log("DEBUG", "BattleLog: loss text but not-for-me — skipping.")
             return
 
         now = time.time()
