@@ -176,13 +176,273 @@ def _describe_pet(meta, pet_uuid):
     return " · ".join(parts)
 
 
+def _pet_name_map(meta, info):
+    """uuid -> readable label like 'Your bee' / 'Enemy gfish', disambiguated when two
+    pets share a name."""
+    labels = {}
+    counts = {}
+    for side, tag in (('player', 'Your'), ('enemy', 'Enemy')):
+        for uid in (info.get(side, {}) or {}).get('team', []) or []:
+            pet = meta.get(uid, {})
+            name = _clean_emoji(pet.get('name') or (pet.get('info', {}) or {}).get('name') or '?')
+            key = (tag, name)
+            counts[key] = counts.get(key, 0) + 1
+            label = f"{tag} {name}"
+            if counts[key] > 1:
+                label += f"#{counts[key]}"
+            labels[uid] = label
+    return labels
+
+
+def _unwrap_log(entry):
+    # A decoded log entry sometimes comes wrapped as {'metadata': <entry>}.
+    if isinstance(entry, dict) and 'result' not in entry and 'metadata' in entry:
+        return entry['metadata']
+    return entry
+
+
+def _iter_log_entries(battle):
+    """Yield every decoded combat log entry (with its result dict) across all turns."""
+    for turn in battle if isinstance(battle, list) else []:
+        if not isinstance(turn, dict):
+            continue
+        for step in (turn.get('steps') or []):
+            if not isinstance(step, dict):
+                continue
+            for e in (step.get('logs') or []):
+                e = _unwrap_log(e)
+                if isinstance(e, dict) and isinstance(e.get('result'), dict):
+                    yield e
+
+
+def _combat_stats(battle, meta, side_of, names):
+    """Aggregate numbers the player asked to see: total base damage and total healing per
+    side, and the single biggest hit — flagging whether it was a normal attack
+    (componentId == 1) or came from a weapon/passive."""
+    dmg = {'player': 0, 'enemy': 0}
+    hp_heal = {'player': 0, 'enemy': 0}   # HP recovered (heal actions + mid-hit regen)
+    wp_recover = {'player': 0, 'enemy': 0}  # WP/MP replenished (e.g. Energize passive)
+    biggest = None            # (base, src, tgt, kind)
+    biggest_weapon = None     # biggest hit that came from a weapon/passive (not a normal attack)
+
+    for e in _iter_log_entries(battle):
+        res = e['result']
+        at = res.get('actionType')
+        src_id = res.get('source') or e.get('source')
+        tgt_id = res.get('target') or e.get('target')
+        ts = res.get('targetStat') or {}
+        prev, curr = ts.get('prev'), ts.get('curr')
+        delta = (curr - prev) if isinstance(prev, (int, float)) and isinstance(curr, (int, float)) else None
+
+        if at == 'damage':
+            base = res.get('baseValue')
+            comp = res.get('componentId')
+            tag = (res.get('tag') or e.get('tag') or '').upper()
+            s_side = side_of.get(src_id)
+            if isinstance(base, (int, float)) and s_side in dmg:
+                dmg[s_side] += base
+                # A PHYS/MAGIC tag means an ordinary swing (even if the pet holds a weapon,
+                # so componentId is that weapon's id). Only a different tag is a real
+                # weapon/passive damage proc (a DoT like burn/poison, or a weapon active).
+                if tag in ('PHYS', 'MAGIC', 'PHYSICAL', 'MAGICAL') or comp == 1 or comp == '1':
+                    kind = "normal attack"
+                else:
+                    wobj = meta.get(comp) if isinstance(comp, str) else None
+                    wname = (wobj.get('name') if isinstance(wobj, dict) else None) or tag or 'weapon/passive'
+                    kind = f"{_clean_emoji(wname)} (weapon/passive)"
+                hit = (base, names.get(src_id, '?'), names.get(tgt_id, '?'), kind)
+                if biggest is None or base > biggest[0]:
+                    biggest = hit
+                if kind != "normal attack" and (biggest_weapon is None or base > biggest_weapon[0]):
+                    biggest_weapon = hit
+            # A target that NET-gained hp during a hit regenerated — credit its side (HP).
+            if delta and delta > 0:
+                t_side = side_of.get(tgt_id)
+                if t_side in hp_heal:
+                    hp_heal[t_side] += delta
+        elif at == 'heal':
+            if delta and delta > 0:
+                t_side = side_of.get(tgt_id)
+                if t_side in hp_heal:
+                    hp_heal[t_side] += delta
+        elif at == 'replenish':
+            # WP/MP replenished (targetStat here is WP, not HP).
+            if delta and delta > 0:
+                t_side = side_of.get(tgt_id)
+                if t_side in wp_recover:
+                    wp_recover[t_side] += delta
+
+    lines = ["COMBAT STATS:"]
+    lines.append(f"  Total base damage dealt — You: {dmg['player']} | Enemy: {dmg['enemy']}")
+    lines.append(f"  Total HP healed/regenerated — You: {hp_heal['player']} | Enemy: {hp_heal['enemy']}")
+    lines.append(f"  Total WP replenished — You: {wp_recover['player']} | Enemy: {wp_recover['enemy']}")
+    if biggest:
+        lines.append(f"  Biggest single hit: {biggest[1]} → {biggest[2]}, base {biggest[0]} — {biggest[3]}")
+    if biggest_weapon:
+        lines.append(f"  Biggest weapon/passive hit: {biggest_weapon[1]} → {biggest_weapon[2]}, base {biggest_weapon[0]} — {biggest_weapon[3]}")
+    else:
+        lines.append("  Biggest weapon/passive hit: none — all damage came from normal attacks")
+    return lines
+
+
+def _key_events(battle, meta, info, names, side_of):
+    """Surface the signals that explain a loss: which of your pets died and when (and
+    whether it was a one-turn burst), whether a weapon-pet ran out of WP to use its weapon
+    (mana starvation), and any crowd-control (stun/taunt/debuff) the enemy landed on you."""
+    turns = [t for t in battle if isinstance(t, dict) and isinstance(t.get('state'), dict)]
+    turns.sort(key=lambda t: t.get('turn', 0) if isinstance(t.get('turn'), int) else 0)
+    player_ids = (info.get('player', {}) or {}).get('team', []) or []
+
+    deaths, mana, cc = [], [], []
+
+    for uid in player_ids:
+        nm = names.get(uid, '?')
+        maxhp = None
+        prev = None
+        for t in turns:
+            hp = (t['state'].get(uid) or {}).get('hp')
+            if not isinstance(hp, (int, float)):
+                continue
+            if maxhp is None:
+                maxhp = hp
+            if hp == 0:
+                tn = t.get('turn')
+                if prev is not None and maxhp and prev > 0.5 * maxhp:
+                    deaths.append(f"{nm} died turn {tn} ({prev}→0 HP in one turn — burst)")
+                else:
+                    deaths.append(f"{nm} died turn {tn}")
+                break
+            prev = hp
+
+    # Gather every WP observation per pet (turn- AND step-level states) and count how many
+    # times each pet actually fired its weapon — a weapon that fired wasn't mana-starved.
+    wp_seen = {}
+    weapon_fires = {}
+    for t in turns:
+        for uid, sv in (t.get('state') or {}).items():
+            if isinstance(sv, dict) and isinstance(sv.get('wp'), (int, float)):
+                wp_seen.setdefault(uid, []).append(sv['wp'])
+        for step in (t.get('steps') or []):
+            if isinstance(step, dict):
+                for uid, sv in (step.get('state') or {}).items():
+                    if isinstance(sv, dict) and isinstance(sv.get('wp'), (int, float)):
+                        wp_seen.setdefault(uid, []).append(sv['wp'])
+    for e in _iter_log_entries(battle):
+        res = e['result']
+        if res.get('actionType') in ('use_wp', 'apply_buff'):
+            src = res.get('source') or e.get('source')
+            weapon_fires[src] = weapon_fires.get(src, 0) + 1
+
+    for uid in player_ids:
+        pet = meta.get(uid, {})
+        st = pet.get('stats', {}) or {}
+        wid = st.get('weapon') or pet.get('weapon')
+        weapon = meta.get(wid) if isinstance(wid, str) else None
+        if not isinstance(weapon, dict):
+            continue
+        cost = weapon.get('manaCost')
+        wps = wp_seen.get(uid) or []
+        nm = names.get(uid, '?')
+        wn = _clean_emoji(weapon.get('name') or 'weapon')
+        fires = weapon_fires.get(uid, 0)
+        wp_hi = max(wps) if wps else '?'
+        if fires > 0:
+            mana.append(f"{nm}: used {wn} {fires}x (WP up to {wp_hi}, cost {cost}) — mana OK")
+        elif isinstance(cost, (int, float)) and wps and max(wps) < cost:
+            mana.append(f"{nm}: never used {wn} — WP capped at {wp_hi} < {cost} cost → mana-starved")
+        else:
+            mana.append(f"{nm}: did not use {wn} (WP up to {wp_hi}, cost {cost})")
+
+    for e in _iter_log_entries(battle):
+        res = e['result']
+        if res.get('actionType') != 'apply_buff':
+            continue
+        bid = res.get('buffComponentId') or res.get('componentId')
+        bobj = meta.get(bid) if isinstance(bid, str) else None
+        if not isinstance(bobj, dict):
+            continue
+        if bobj.get('stun') or bobj.get('taunting') or bobj.get('debuff'):
+            tgt = res.get('target')
+            if side_of.get(tgt) == 'player':  # crowd control landed on us
+                kind = 'stun' if bobj.get('stun') else ('taunt' if bobj.get('taunting') else 'debuff')
+                cc.append(f"{names.get(res.get('source'), '?')} {kind}'d {names.get(tgt, '?')} with {_clean_emoji(bobj.get('name') or '')}")
+
+    if not (deaths or mana or cc):
+        return []
+    lines = ["KEY EVENTS (your side):"]
+    for d in deaths:
+        lines.append(f"  {d}")
+    for m in mana:
+        lines.append(f"  Mana — {m}")
+    if cc:
+        for c in cc:
+            lines.append(f"  CC — {c}")
+    else:
+        lines.append("  CC — enemy landed no stun/taunt/debuff on you")
+    return lines
+
+
+def _narrate_battle(battle, meta, names, max_lines=60):
+    """Turn-by-turn combat lines: who hit whom for how much, heals, and buffs/effects —
+    using the clean prev/curr HP snapshots (no float decoding needed)."""
+    lines = []
+    for turn in battle if isinstance(battle, list) else []:
+        if not isinstance(turn, dict) or turn.get('initial'):
+            continue
+        tnum = turn.get('turn')
+        turn_lines = []
+        for step in (turn.get('steps') or []):
+            if not isinstance(step, dict):
+                continue
+            for e in (step.get('logs') or []):
+                e = _unwrap_log(e)
+                if not isinstance(e, dict):
+                    continue
+                res = e.get('result') or {}
+                if not isinstance(res, dict):
+                    continue
+                at = res.get('actionType')
+                tag = res.get('tag') or e.get('tag') or ''
+                src = names.get(res.get('source') or e.get('source'), '?')
+                tgt = names.get(res.get('target') or e.get('target'), '?')
+                ts = res.get('targetStat') or {}
+                prev, curr = ts.get('prev'), ts.get('curr')
+                delta = None
+                if isinstance(prev, (int, float)) and isinstance(curr, (int, float)):
+                    delta = curr - prev
+                # HP transition prev->curr is always accurate; show a signed Δ and let the
+                # reader interpret (net includes any regen that fired the same step).
+                d = f" (Δ{'+' if delta and delta > 0 else ''}{delta})" if delta is not None else ""
+                if at == 'damage':
+                    dt = res.get('damageType', '')
+                    base = res.get('baseValue')
+                    base_s = f", base {base}" if isinstance(base, (int, float)) else ""
+                    turn_lines.append(f"{src} → {tgt} {dt} hit: hp {prev}→{curr}{d}{base_s}")
+                elif at == 'heal':
+                    turn_lines.append(f"{tgt} healed [{tag}]: hp {prev}→{curr}{d}")
+                elif at == 'apply_buff':
+                    bid = res.get('buffComponentId') or res.get('componentId')
+                    bobj = meta.get(bid) if isinstance(bid, str) else None
+                    bname = (bobj.get('name') if isinstance(bobj, dict) else None) or res.get('tag') or 'buff'
+                    dur = res.get('duration')
+                    dur_s = f" {dur}t" if dur else ""
+                    turn_lines.append(f"{src} applied {_clean_emoji(bname)} to {tgt}{dur_s}")
+        if turn_lines:
+            lines.append(f"Turn {tnum}:")
+            lines.extend("  " + l for l in turn_lines)
+        if len(lines) >= max_lines:
+            lines.append("  ... (truncated)")
+            break
+    return lines
+
+
 def summarize_battle(raw):
     """Turn a raw v2 battle-log into compact readable text for AI analysis. Returns the
     summary string, or None if the log can't be decoded."""
-    battle = decode_v2(raw)
-    if not isinstance(battle, dict):
+    decoded = decode_v2(raw)
+    if not isinstance(decoded, dict):
         return None
-    meta = battle.get('metadata', battle)
+    meta = decoded.get('metadata', decoded)
     info = meta.get('info', {}) if isinstance(meta, dict) else {}
     if not info:
         return None
@@ -209,5 +469,20 @@ def summarize_battle(raw):
         desc = _describe_pet(meta, uid)
         if desc:
             lines.append(f"  - {desc}")
+
+    # Turn-by-turn combat + the aggregate stats the player wants (totals, biggest hit).
+    battle_turns = decoded.get('battle')
+    if battle_turns:
+        names = _pet_name_map(meta, info)
+        side_of = {}
+        for side in ('player', 'enemy'):
+            for uid in (info.get(side, {}) or {}).get('team', []) or []:
+                side_of[uid] = side
+        lines.extend(_combat_stats(battle_turns, meta, side_of, names))
+        lines.extend(_key_events(battle_turns, meta, info, names, side_of))
+        narration = _narrate_battle(battle_turns, meta, names)
+        if narration:
+            lines.append("COMBAT LOG:")
+            lines.extend(narration)
 
     return "\n".join(lines)
