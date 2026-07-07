@@ -285,6 +285,111 @@ def _combat_stats(battle, meta, side_of, names):
     return lines
 
 
+_NORMAL_TAGS = ('PHYS', 'MAGIC', 'PHYSICAL', 'MAGICAL')
+
+
+def _damage_taken_per_pet(battle):
+    """Gross HP each pet lost to incoming damage (sum of negative net deltas on damage
+    hits). Used to judge how well a heal passive kept up with the punishment."""
+    taken = {}
+    for e in _iter_log_entries(battle):
+        res = e['result']
+        if res.get('actionType') != 'damage':
+            continue
+        tgt = res.get('target') or e.get('target')
+        ts = res.get('targetStat') or {}
+        prev, curr = ts.get('prev'), ts.get('curr')
+        if isinstance(prev, (int, float)) and isinstance(curr, (int, float)) and curr < prev:
+            taken[tgt] = taken.get(tgt, 0) + (prev - curr)
+    return taken
+
+
+def _effect_breakdown(battle, meta, side_of, names):
+    """Break results down by the specific passive/weapon effect, and judge its in-battle
+    effectiveness (e.g. a heal vs how much damage its target took), so the AI can weigh how
+    much each passive actually mattered — single-target vs whole-team, kept up or not."""
+    taken = _damage_taken_per_pet(battle)
+    groups = {}  # (side, name, kind, unit) -> {'amount','procs','targets':set,'target_ids':set}
+
+    for e in _iter_log_entries(battle):
+        res = e['result']
+        at = res.get('actionType')
+        tag = (res.get('tag') or e.get('tag') or '')
+        is_passive_dmg = (at == 'damage' and tag.upper() not in _NORMAL_TAGS)
+        if at not in ('heal', 'replenish', 'apply_buff') and not is_passive_dmg:
+            continue
+        comp = res.get('buffComponentId') or res.get('componentId')
+        obj = meta.get(comp) if isinstance(comp, str) else None
+        name = (obj.get('name') if isinstance(obj, dict) else None) or tag or 'effect'
+        name = _clean_emoji(name)
+        src = res.get('source') or e.get('source')
+        tgt = res.get('target') or e.get('target')
+        side = side_of.get(src) or side_of.get(tgt)
+        ts = res.get('targetStat') or {}
+        prev, curr = ts.get('prev'), ts.get('curr')
+        delta = (curr - prev) if isinstance(prev, (int, float)) and isinstance(curr, (int, float)) else None
+
+        if at == 'heal':
+            kind = 'healed'
+            unit = 'HP'
+            amt = delta if delta and delta > 0 else 0
+        elif at == 'replenish':
+            kind = 'replenished'
+            unit = 'WP'
+            amt = delta if delta and delta > 0 else 0
+        elif at == 'apply_buff':
+            kind = 'buff'
+            unit = ''
+            amt = 0
+        else:
+            kind = 'DoT dmg'
+            unit = 'base'
+            amt = res.get('baseValue') if isinstance(res.get('baseValue'), (int, float)) else 0
+
+        key = (side, name, kind, unit)
+        g = groups.setdefault(key, {'amount': 0, 'procs': 0, 'targets': set(), 'target_ids': set()})
+        g['amount'] += amt
+        g['procs'] += 1
+        if tgt in names:
+            g['targets'].add(names[tgt])
+        if tgt is not None:
+            g['target_ids'].add(tgt)
+
+    if not groups:
+        return []
+
+    # 1) Full listing first — every passive/weapon effect and what it did.
+    listing = ["PASSIVE & WEAPON EFFECTS:"]
+    # 2) Then a separate effectiveness read on those effects.
+    effectiveness = []
+    for (side, name, kind, unit), g in sorted(groups.items(), key=lambda kv: (kv[0][0] or '', -kv[1]['amount'])):
+        who = 'You' if side == 'player' else ('Enemy' if side == 'enemy' else '?')
+        tgts = sorted(g['targets'])
+        scope = tgts[0] if len(tgts) == 1 else (f"whole team ({', '.join(tgts)})" if len(tgts) > 1 else "?")
+        if unit:
+            listing.append(f"  {who} {name} — {kind} {g['amount']} {unit} ({g['procs']}x) → {scope}")
+        else:
+            listing.append(f"  {who} {name} — {kind} ({g['procs']}x) → {scope}")
+
+        # Effectiveness: for a heal, how much of the target's incoming damage it offset.
+        if kind == 'healed' and g['amount'] > 0:
+            dmg_on_targets = sum(taken.get(tid, 0) for tid in g['target_ids'])
+            if dmg_on_targets > 0:
+                pct = round(100 * g['amount'] / dmg_on_targets)
+                verdict = "kept up with the damage" if pct >= 80 else (
+                    "helped but not enough" if pct >= 40 else "far too little to matter")
+                span = scope if len(tgts) == 1 else f"its targets ({', '.join(tgts)})"
+                effectiveness.append(
+                    f"  {who} {name}: healed {g['amount']} HP vs {dmg_on_targets} HP damage taken "
+                    f"by {span} → offset {pct}% ({verdict})")
+
+    lines = list(listing)
+    if effectiveness:
+        lines.append("PASSIVE EFFECTIVENESS:")
+        lines.extend(effectiveness)
+    return lines
+
+
 def _key_events(battle, meta, info, names, side_of):
     """Surface the signals that explain a loss: which of your pets died and when (and
     whether it was a one-turn burst), whether a weapon-pet ran out of WP to use its weapon
@@ -479,6 +584,7 @@ def summarize_battle(raw):
             for uid in (info.get(side, {}) or {}).get('team', []) or []:
                 side_of[uid] = side
         lines.extend(_combat_stats(battle_turns, meta, side_of, names))
+        lines.extend(_effect_breakdown(battle_turns, meta, side_of, names))
         lines.extend(_key_events(battle_turns, meta, info, names, side_of))
         narration = _narrate_battle(battle_turns, meta, names)
         if narration:
