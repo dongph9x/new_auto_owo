@@ -269,6 +269,45 @@ class WebSolver:
                 self.bot.log("ERROR", f"{self.provider}: auto-verification failed: {reason}")
                 return False, reason
 
+    async def fetch_battle_log(self, uuid):
+        """Authenticate to owobot as this account (same Discord OAuth flow used for
+        captcha) and pull the structured battle-log JSON for `uuid`. This is exactly
+        what the account's own owner sees on the website, just fetched by the bot.
+        Returns the parsed JSON dict, or None on failure."""
+        headers = {
+            "Authorization": self.bot.token,
+            "Content-Type": "application/json",
+            "User-Agent": "Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/120.0.0.0 Safari/537.36"
+        }
+        async with aiohttp.ClientSession(headers=headers) as session:
+            try:
+                auth_payload = {
+                    "authorize": True,
+                    "permissions": "0",
+                    "integration_type": 0,
+                    "location_context": {"guild_id": "10000", "channel_id": "10000", "channel_type": 10000}
+                }
+                async with session.post(self.auth_url, json=auth_payload) as resp:
+                    if resp.status != 200:
+                        self.bot.log("ERROR", f"BattleLog: OAuth authorize failed (HTTP {resp.status})")
+                        return None
+                    auth_data = await resp.json()
+                    redirect_url = auth_data.get("location")
+
+                # Following the redirect establishes the owobot session cookie on this session.
+                if redirect_url:
+                    async with session.get(redirect_url) as r: pass
+
+                api_url = f"https://owobot.com/api/battle-log?uuid={uuid}"
+                async with session.get(api_url, headers={"Referer": f"https://owobot.com/battle-log?uuid={uuid}"}) as r:
+                    if r.status != 200:
+                        self.bot.log("WARN", f"BattleLog: API returned HTTP {r.status} for {uuid}")
+                        return None
+                    return await r.json()
+            except Exception as e:
+                self.bot.log("ERROR", f"BattleLog: fetch failed: {e}")
+                return None
+
     async def open_in_browser(self, captcha_url=None):
         """gets oauth redirect url and opens it in browser for auto-login/manual solve"""
         headers = {

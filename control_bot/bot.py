@@ -75,11 +75,17 @@ async def account_autocomplete(interaction: discord.Interaction, current: str):
 async def resolve_account_id(session: aiohttp.ClientSession, name: str):
     headers = {"Authorization": f"Bearer {CONTROL_API_TOKEN}"}
     async with session.get(f"{DASHBOARD_URL}/api/accounts/list", headers=headers) as r:
-        if r.status != 200:
-            return None
-        accounts = await r.json()
-    match = next((a for a in accounts if a.get("name") == name or a.get("username") == name), None)
-    return match["id"] if match else None
+        if r.status == 200:
+            accounts = await r.json()
+            match = next((a for a in accounts if a.get("name") == name or a.get("username") == name), None)
+            if match:
+                return match["id"]
+    # Offline fallback — battle history lives in SQLite, not in a live bot instance.
+    for a in load_accounts():
+        if a.get("name") == name:
+            aid = a.get("id") or a.get("user_id")
+            return str(aid) if aid else None
+    return None
 
 
 async def send_control_action(action: str, name: str):
@@ -97,6 +103,73 @@ async def send_control_action(action: str, name: str):
                 return False, f"Dashboard returned HTTP {r.status}"
             data = await r.json()
             return bool(data.get("success")), None
+
+
+def api_headers():
+    return {"Authorization": f"Bearer {CONTROL_API_TOKEN}"}
+
+
+async def resolve_account_id_for_user(session: aiohttp.ClientSession, interaction: discord.Interaction, account: str):
+    if not is_allowed_for_account(interaction, account):
+        return None, f"You're not authorized to manage **{account}**."
+    account_id = await resolve_account_id(session, account)
+    if not account_id:
+        return None, f"Account **{account}** not found (bot may be offline)."
+    return account_id, None
+
+
+async def dashboard_get(path: str, params: dict | None = None):
+    async with aiohttp.ClientSession() as session:
+        async with session.get(f"{DASHBOARD_URL}{path}", headers=api_headers(), params=params or {}) as r:
+            try:
+                data = await r.json()
+            except Exception:
+                data = {}
+            return r.status, data
+
+
+def split_discord_message(text: str, limit: int = 1900):
+    """Split long text into chunks that fit Discord's message limit."""
+    if len(text) <= limit:
+        return [text]
+    chunks = []
+    while text:
+        if len(text) <= limit:
+            chunks.append(text)
+            break
+        split_at = text.rfind("\n", 0, limit)
+        if split_at < limit // 2:
+            split_at = limit
+        chunks.append(text[:split_at])
+        text = text[split_at:].lstrip("\n")
+    return chunks
+
+
+def format_losses_embed(account: str, battles: list) -> discord.Embed:
+    embed = discord.Embed(
+        title=f"❌ Losses — {account}",
+        color=0xEF4444,
+    )
+
+    if not battles:
+        embed.description = "_Chưa có trận thua nào được ghi._"
+        return embed
+
+    lines = []
+    for b in battles:
+        bid = b.get("id", "?")
+        ts = b.get("timestamp", "?")
+        streak = b.get("streak")
+        streak_part = f" · streak **{streak}**" if streak is not None else ""
+        link = b.get("battle_link")
+        link_part = f" · [log]({link})" if link else ""
+        lines.append(f"**#{bid}** · `{ts}`{streak_part}{link_part}")
+
+    body = "\n".join(lines)
+    if len(body) > 4000:
+        body = body[:3997] + "…"
+    embed.description = body
+    return embed
 
 
 @tree.command(name="pause", description="Pause a NeuraSelf account")
@@ -127,6 +200,81 @@ async def start_cmd(interaction: discord.Interaction, account: str):
         await interaction.followup.send(f"▶️ Resumed **{account}**.", ephemeral=True)
     else:
         await interaction.followup.send(f"❌ Failed to resume **{account}**: {err or 'unknown error'}", ephemeral=True)
+
+
+@tree.command(name="battles", description="Trận thua gần nhất (id · thời gian · link log)")
+@app_commands.describe(
+    account="Account cần xem",
+    limit="Số trận thua cần lấy (1–20)",
+)
+@app_commands.autocomplete(account=account_autocomplete)
+async def battles_cmd(
+    interaction: discord.Interaction,
+    account: str,
+    limit: app_commands.Range[int, 1, 20] = 10,
+):
+    await interaction.response.defer(ephemeral=True)
+    async with aiohttp.ClientSession() as session:
+        account_id, err = await resolve_account_id_for_user(session, interaction, account)
+    if err:
+        await interaction.followup.send(err, ephemeral=True)
+        return
+
+    status, data = await dashboard_get("/api/battles", {
+        "id": account_id,
+        "limit": limit,
+        "result": "lose",
+    })
+    if status != 200:
+        await interaction.followup.send(f"❌ Dashboard HTTP {status}", ephemeral=True)
+        return
+    if data.get("error"):
+        await interaction.followup.send(f"❌ {data['error']}", ephemeral=True)
+        return
+
+    embed = format_losses_embed(account, data.get("battles") or [])
+    await interaction.followup.send(embed=embed, ephemeral=True)
+
+
+@tree.command(name="analyze", description="AI analysis of battle log(s) by ID or recent losses (ChatGPT)")
+@app_commands.describe(
+    account="The account to analyse",
+    battle_id="Log ID from /battles (e.g. 42 or 42,43). Leave empty for recent losses.",
+)
+@app_commands.autocomplete(account=account_autocomplete)
+async def analyze_cmd(interaction: discord.Interaction, account: str, battle_id: str = None):
+    await interaction.response.defer(ephemeral=True)
+    async with aiohttp.ClientSession() as session:
+        account_id, err = await resolve_account_id_for_user(session, interaction, account)
+    if err:
+        await interaction.followup.send(err, ephemeral=True)
+        return
+
+    params = {"id": account_id}
+    if battle_id and battle_id.strip():
+        params["battle_id"] = battle_id.strip()
+
+    status, data = await dashboard_get("/api/battles/analyze", params)
+    if status != 200:
+        await interaction.followup.send(f"❌ Dashboard HTTP {status}", ephemeral=True)
+        return
+
+    if not data.get("success"):
+        await interaction.followup.send(f"❌ {data.get('error', 'Analysis failed')}", ephemeral=True)
+        return
+
+    summary = data.get("summary", "")
+    counts = data.get("counts") or {}
+    wr = counts.get("win_rate")
+    wr_part = f" ({wr}% WR)" if wr is not None else ""
+    ids = data.get("battle_ids") or []
+    id_part = f" · log **#{', #'.join(str(i) for i in ids)}**" if ids else ""
+    header = (
+        f"🧠 **Battle analysis — {account}**{id_part}\n"
+        f"Record: {counts.get('wins', 0)}W / {counts.get('loses', 0)}L{wr_part}\n\n"
+    )
+    for chunk in split_discord_message(header + summary):
+        await interaction.followup.send(chunk, ephemeral=True)
 
 
 @client.event

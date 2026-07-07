@@ -658,14 +658,188 @@ def captcha_stats():
     account_id = request.args.get('id')
     bot = get_bot(account_id)
     st = bot.stats if bot else {}
-    
+
     solved = st.get('captchas_solved_today', 0)
     success = st.get('captcha_success_count', 0)
     success_rate = 100 if solved == 0 else round((success / max(solved, 1)) * 100)
-    
+
     return jsonify({
         'solved': solved,
         'success_rate': success_rate
+    })
+
+def _account_battle_analysis_cfg(account_id):
+    """Merged battle_analysis config for an account (live bot config if running,
+    else the account settings file, else global)."""
+    bot = get_bot(account_id)
+    if bot and bot.user and str(bot.user.id) == str(account_id):
+        return bot.config.get('battle_analysis', {})
+    for path in (os.path.join(state.CONFIG_DIR, f'settings_{account_id}.json'),
+                 os.path.join(state.CONFIG_DIR, 'settings.json')):
+        if account_id and 'settings_' not in path:
+            pass
+        if os.path.exists(path):
+            try:
+                with open(path) as f:
+                    return json.load(f).get('battle_analysis', {})
+            except Exception:
+                pass
+    return {}
+
+@app.route('/api/battles')
+@api_or_login_required
+def battles_list():
+    from utils import history_tracker as ht
+    account_id = request.args.get('id')
+    bot = get_bot(account_id)
+    uid = str(account_id) if account_id else (str(bot.user.id) if bot and bot.user else None)
+    if not uid:
+        return jsonify({"error": "no account"}), 400
+
+    limit = min(int(request.args.get('limit', 20)), 100)
+    result = request.args.get('result')  # optional 'lose'/'win'
+    return jsonify({
+        "counts": ht.get_battle_result_counts(uid),
+        "battles": ht.get_recent_battles(uid, limit=limit, result=result),
+    })
+
+def _parse_battle_ids(raw):
+    """Parse '42' or '42,43' or '#42' into a list of ints."""
+    if not raw:
+        return []
+    ids = []
+    for part in str(raw).split(','):
+        part = part.strip().lstrip('#')
+        if part.isdigit():
+            ids.append(int(part))
+    return ids
+
+
+def _battle_analysis_prompt(battles, counts, *, specific=False):
+    """Build the analysis prompt from raw battle-log JSON (schema-agnostic)."""
+    detailed = [b for b in battles if b.get('raw_json')]
+    payload = detailed[:15]
+    if not payload:
+        if specific:
+            return None, "Selected battle log(s) have no detailed JSON — only losses are auto-fetched by default."
+        return None, "No losses with detailed battle data yet — thua vài trận có link log trước."
+
+    import json as _json
+    labelled = [{"log_id": b.get("id"), "result": b.get("result"), "data": b["raw_json"]} for b in payload]
+    battles_text = _json.dumps(labelled, ensure_ascii=False)
+    scope = (
+        "Below is the raw JSON of the specific battle log(s) you asked for (owobot battle-log API)."
+        if specific else
+        "Below is the raw JSON of recent LOST battles from owobot's battle-log API."
+    )
+    prompt = (
+        "You are analysing OwO Discord bot battles to help the player improve their build. "
+        f"Overall record: {counts.get('wins',0)} wins / {counts.get('loses',0)} losses "
+        f"(win rate {counts.get('win_rate')}%). "
+        f"{scope} "
+        "Figure out the schema yourself, then tell me concisely (in Vietnamese):\n"
+        "1. The most common reasons these losses happened (level gaps, weapon/gear, team "
+        "composition, enemy patterns).\n"
+        "2. Concrete build changes to reduce losses.\n"
+        "3. Any striking patterns across the losses.\n"
+        "Keep it practical and short.\n\n"
+        f"BATTLES JSON:\n{battles_text}"
+    )
+    return prompt, None
+
+
+def _run_battle_analysis(cfg, battles, counts, *, specific=False):
+    api_key = cfg.get('ai_api_key')
+    if not api_key:
+        return None, "No AI API key configured (battle_analysis.ai_api_key)."
+
+    prompt, err = _battle_analysis_prompt(battles, counts, specific=specific)
+    if err:
+        return None, err
+
+    provider = (cfg.get('ai_provider') or 'openai').lower()
+    model = cfg.get('ai_model') or ('gpt-4o-mini' if provider == 'openai' else 'claude-sonnet-5')
+
+    try:
+        import requests as _requests
+        if provider == 'openai':
+            resp = _requests.post(
+                "https://api.openai.com/v1/chat/completions",
+                headers={
+                    "Authorization": f"Bearer {api_key}",
+                    "Content-Type": "application/json",
+                },
+                json={
+                    "model": model,
+                    "max_tokens": 1024,
+                    "messages": [{"role": "user", "content": prompt}],
+                },
+                timeout=60,
+            )
+            if resp.status_code != 200:
+                return None, f"OpenAI API HTTP {resp.status_code}: {resp.text[:300]}"
+            data = resp.json()
+            text = data["choices"][0]["message"]["content"]
+            return text.strip(), None
+
+        resp = _requests.post(
+            "https://api.anthropic.com/v1/messages",
+            headers={
+                "x-api-key": api_key,
+                "anthropic-version": "2023-06-01",
+                "content-type": "application/json",
+            },
+            json={
+                "model": model,
+                "max_tokens": 1024,
+                "messages": [{"role": "user", "content": prompt}],
+            },
+            timeout=60,
+        )
+        if resp.status_code != 200:
+            return None, f"Anthropic API HTTP {resp.status_code}: {resp.text[:300]}"
+        data = resp.json()
+        text = "".join(block.get("text", "") for block in data.get("content", []) if block.get("type") == "text")
+        return text.strip(), None
+    except Exception as e:
+        return None, f"AI request failed: {e}"
+
+@app.route('/api/battles/analyze', methods=['POST', 'GET'])
+@api_or_login_required
+def battles_analyze():
+    from utils import history_tracker as ht
+    account_id = request.args.get('id')
+    bot = get_bot(account_id)
+    uid = str(account_id) if account_id else (str(bot.user.id) if bot and bot.user else None)
+    if not uid:
+        return jsonify({"error": "no account"}), 400
+
+    counts = ht.get_battle_result_counts(uid)
+    battle_ids = _parse_battle_ids(request.args.get('battle_id'))
+    specific = bool(battle_ids)
+
+    if battle_ids:
+        battles = ht.get_battles_by_ids(uid, battle_ids)
+        found_ids = {b['id'] for b in battles}
+        missing = [i for i in battle_ids if i not in found_ids]
+        if missing:
+            return jsonify({
+                "success": False,
+                "error": f"Battle log ID not found: {', '.join(str(i) for i in missing)}",
+                "counts": counts,
+            }), 200
+    else:
+        battles = ht.get_recent_battles(uid, limit=30, result='lose')
+
+    cfg = _account_battle_analysis_cfg(uid)
+    summary, err = _run_battle_analysis(cfg, battles, counts, specific=specific)
+    if err:
+        return jsonify({"success": False, "error": err, "counts": counts}), 200
+    return jsonify({
+        "success": True,
+        "summary": summary,
+        "counts": counts,
+        "battle_ids": [b['id'] for b in battles],
     })
 
 @app.route('/api/bot/command', methods=['POST'])

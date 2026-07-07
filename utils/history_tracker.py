@@ -53,6 +53,19 @@ def init_db():
             message TEXT
         )
     ''')
+    c.execute('''
+        CREATE TABLE IF NOT EXISTS battles (
+            id INTEGER PRIMARY KEY AUTOINCREMENT,
+            account_id TEXT,
+            timestamp TEXT,
+            result TEXT,           -- 'win' | 'lose' | 'unknown'
+            streak INTEGER,        -- win streak at the moment of loss
+            uuid TEXT,
+            battle_link TEXT,
+            raw_json TEXT          -- full structured battle data from owobot's API
+        )
+    ''')
+    c.execute('CREATE INDEX IF NOT EXISTS idx_battles_account ON battles(account_id, id)')
     conn.commit()
     conn.close()
 
@@ -247,9 +260,91 @@ def get_analytics_data(start_date=None, end_date=None):
         
     totals = get_all_time_stats()
     conn.close()
-    
+
     return {
         "sessions": sessions,
         "cash_history": cash_history,
         "totals": totals
+    }
+
+
+def record_battle(account_id, result, streak=None, uuid=None, battle_link=None, raw_json=None):
+    """Persist one battle. raw_json should be a JSON-serialisable object (the structured
+    data from owobot's /api/battle-log) or None if it couldn't be fetched."""
+    conn = get_db()
+    c = conn.cursor()
+    timestamp = datetime.now().strftime("%Y-%m-%d %H:%M:%S")
+    raw_str = None
+    if raw_json is not None:
+        raw_str = raw_json if isinstance(raw_json, str) else json.dumps(raw_json)
+    c.execute('''
+        INSERT INTO battles (account_id, timestamp, result, streak, uuid, battle_link, raw_json)
+        VALUES (?, ?, ?, ?, ?, ?, ?)
+    ''', (str(account_id), timestamp, result, streak, uuid, battle_link, raw_str))
+    conn.commit()
+    conn.close()
+
+
+def get_recent_battles(account_id, limit=20, result=None):
+    """Recent battles for an account, newest first. Pass result='lose' to filter."""
+    conn = get_db()
+    c = conn.cursor()
+    query = 'SELECT id, timestamp, result, streak, uuid, battle_link, raw_json FROM battles WHERE account_id = ?'
+    params = [str(account_id)]
+    if result:
+        query += ' AND result = ?'
+        params.append(result)
+    query += ' ORDER BY id DESC LIMIT ?'
+    params.append(limit)
+    c.execute(query, params)
+    rows = c.fetchall()
+    conn.close()
+    return [_battle_row_to_dict(r) for r in rows]
+
+
+def get_battles_by_ids(account_id, battle_ids):
+    """Fetch specific battle rows by SQLite id (scoped to account)."""
+    ids = [int(i) for i in battle_ids if i is not None]
+    if not ids:
+        return []
+    conn = get_db()
+    c = conn.cursor()
+    placeholders = ','.join('?' * len(ids))
+    query = (
+        f'SELECT id, timestamp, result, streak, uuid, battle_link, raw_json '
+        f'FROM battles WHERE account_id = ? AND id IN ({placeholders}) ORDER BY id DESC'
+    )
+    c.execute(query, [str(account_id)] + ids)
+    rows = c.fetchall()
+    conn.close()
+    return [_battle_row_to_dict(r) for r in rows]
+
+
+def _battle_row_to_dict(row):
+    return {
+        "id": row[0],
+        "timestamp": row[1],
+        "result": row[2],
+        "streak": row[3],
+        "uuid": row[4],
+        "battle_link": row[5],
+        "raw_json": json.loads(row[6]) if row[6] else None,
+    }
+
+
+def get_battle_result_counts(account_id):
+    conn = get_db()
+    c = conn.cursor()
+    c.execute('SELECT result, COUNT(*) FROM battles WHERE account_id = ? GROUP BY result', (str(account_id),))
+    counts = {row[0]: row[1] for row in c.fetchall()}
+    conn.close()
+    wins = counts.get('win', 0)
+    loses = counts.get('lose', 0)
+    total = sum(counts.values())
+    return {
+        "wins": wins,
+        "loses": loses,
+        "unknown": counts.get('unknown', 0),
+        "total": total,
+        "win_rate": round(wins / (wins + loses) * 100, 1) if (wins + loses) else None,
     }

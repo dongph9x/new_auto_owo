@@ -232,6 +232,11 @@
             "url": "Your-own-discord-webhook-put-here-important-for-securtiy-alert-and-must-on-hosting"
         }
     },
+    "battle_analysis": {
+        "ai_provider": "openai",
+        "ai_api_key": "",
+        "ai_model": "gpt-4o-mini"
+    },
     "boss": {
         "enabled": true,
         "ignore_guilds": [],
