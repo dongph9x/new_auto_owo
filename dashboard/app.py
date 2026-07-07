@@ -715,51 +715,80 @@ def _parse_battle_ids(raw):
     return ids
 
 
+def _battle_entry_text(b):
+    """Best available readable text for one battle: the decoded v2 replay (rich — teams,
+    levels, stats, weapons, passive effects) when we have raw_json, else the Discord
+    battle message (log_text)."""
+    raw = b.get('raw_json')
+    if raw:
+        try:
+            from utils.battle_log_decoder import summarize_battle
+            summary = summarize_battle(raw)
+            if summary:
+                return summary
+        except Exception:
+            pass
+    return b.get('log_text')
+
+
 def _battle_analysis_prompt(battles, counts, *, specific=False):
-    """Build the analysis prompt. Prefer the human-readable battle text captured from
-    Discord (log_text: teams / weapons / turns) since it's what the AI can actually reason
-    about; fall back to raw_json only when a battle has no log_text (older rows)."""
-    usable = [b for b in battles if b.get('log_text') or b.get('raw_json')]
-    payload = usable[:15]
-    if not payload:
+    """Build the analysis prompt. Each battle is rendered to readable text via the v2
+    replay decoder (falling back to the Discord message) so the AI sees full detail:
+    both teams' pets, levels, stats, weapons and passive effects."""
+    labelled = []
+    for b in battles:
+        text = _battle_entry_text(b)
+        if not text:
+            continue
+        labelled.append({
+            "log_id": b.get("id"),
+            "result": b.get("result"),
+            "streak": b.get("streak"),
+            "battle": text,
+        })
+        if len(labelled) >= 15:
+            break
+
+    if not labelled:
         if specific:
             return None, "Selected battle log(s) have no stored data yet — chỉ các trận thua mới được ghi log."
         return None, "No losses with battle data yet — thua vài trận trước đã nhé."
 
     import json as _json
-    labelled = []
-    for b in payload:
-        entry = {"log_id": b.get("id"), "result": b.get("result"), "streak": b.get("streak")}
-        if b.get('log_text'):
-            entry["text"] = b["log_text"]
-        else:
-            entry["data"] = b["raw_json"]
-        labelled.append(entry)
-    battles_text = _json.dumps(labelled, ensure_ascii=False)
+    battles_text = _json.dumps(labelled, ensure_ascii=False, indent=1)
     scope = (
         "Below are the specific battle log(s) you asked for."
         if specific else
         "Below are recent LOST battles."
     )
     prompt = (
-        "You are analysing OwO Discord bot battles to help the player improve their build. "
-        f"Overall record: {counts.get('wins',0)} wins / {counts.get('loses',0)} losses "
-        f"(win rate {counts.get('win_rate')}%). "
-        f"{scope} Each entry has a 'text' field = the battle message showing your team and "
-        "the enemy team with each unit's level, pet emoji, and weapon/gear "
-        "(e.g. 'L.30 - mythic/mcrune/ewgen' means level 30 with those gear pieces; "
-        "'no weapon' means an un-equipped slot). A few older entries may instead have a "
-        "'data' field with raw tokenised JSON — do your best with it.\n\n"
+        "You are a top-tier OwO Discord bot battle expert. You know the pet system "
+        "(ranks common→fabled, stats: hp/att/mag/pr/mr/wp, physical vs magical damage, "
+        "PR resists physical, MR resists magical), the weapon/rune system (mythical/epic "
+        "gear, passives, mana cost, wear/quality, WP economy), team synergy, and how "
+        "level gaps and glass-cannon vs tank compositions decide fights. "
+        f"The player's overall record: {counts.get('wins',0)} wins / {counts.get('loses',0)} "
+        f"losses (win rate {counts.get('win_rate')}%). "
+        f"{scope} Each entry's 'battle' field lists YOUR TEAM and the ENEMY TEAM with each "
+        "pet's name, rank, level, stats, and its weapon + that weapon's passive effect text "
+        "('no weapon' = an empty weapon slot).\n\n"
+        "Analyse like an expert — do not just say 'level gap'. For each recurring problem, "
+        "reason about the actual stats, weapons and passive effects involved: which of your "
+        "pets are dead weight (under-levelled / no weapon / wrong damage type into the "
+        "enemy's PR vs MR), which enemy pets are the real threats and why (e.g. high-att "
+        "glass cannon vs your low hp), and whether your weapons/passives are actually "
+        "helping. Then give concrete, prioritised fixes.\n\n"
         "Answer in Vietnamese, BUT keep every OwO game proper noun in its original form — "
-        "do NOT translate pet names, skill names, weapon/gear names, or emoji codes "
-        "(e.g. keep 'mythic', 'mcrune', 'ewgen', ':bee:', 'no weapon' exactly as written). "
-        "Only the explanation prose is Vietnamese; the game terms stay in English.\n"
-        "Cover concisely:\n"
-        "1. The most common reasons these losses happened (level gaps, missing/weak weapons, "
-        "team composition, enemy patterns).\n"
-        "2. Concrete build changes to reduce losses (which slots to gear up, level targets).\n"
-        "3. Any striking patterns across the losses.\n"
-        "Keep it practical and short.\n\n"
+        "do NOT translate pet names, weapon names, passive/skill names, stat abbreviations "
+        "or emoji codes (keep 'devil_butcher', 'Rune of Celebration', 'Energize', ':bee:', "
+        "'no weapon', 'pr', 'mr', 'wp' exactly as written). Only the explanation prose is "
+        "Vietnamese.\n"
+        "Structure the answer:\n"
+        "1. **Tại sao thua** — the key stat/weapon/damage-type reasons, per pattern.\n"
+        "2. **Sửa build** — concrete prioritised changes (which slot to gear/level first, "
+        "target levels, damage-type or weapon swaps).\n"
+        "3. **Pattern** — anything recurring across the battles.\n"
+        "Be specific and practical, not generic.\n\n"
         f"BATTLES:\n{battles_text}"
     )
     return prompt, None
