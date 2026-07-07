@@ -12,7 +12,6 @@ RUN apt-get update && apt-get install -y --no-install-recommends \
         wget curl gnupg unzip sudo \
         xvfb x11-utils \
         fonts-liberation fonts-noto-color-emoji \
-        libnss3 libxi6 libgconf-2-4 \
         python3 python3-pip python3-venv \
     && rm -rf /var/lib/apt/lists/*
 
@@ -25,8 +24,16 @@ RUN wget -q https://dl.google.com/linux/direct/google-chrome-stable_current_amd6
 
 WORKDIR /app
 
+# Use a venv rather than installing into system Python — Ubuntu 24.04's system pip
+# is dpkg-managed and refuses to let pip upgrade/uninstall its own dependencies
+# (setuptools/pip) even with --break-system-packages, which breaks a plain
+# `pip install` here.
+RUN python3 -m venv /opt/venv
+ENV PATH="/opt/venv/bin:$PATH"
+
 COPY cdp_solver/requirements.txt .
-RUN pip3 install --no-cache-dir --break-system-packages -r requirements.txt \
+RUN pip install --no-cache-dir --upgrade pip \
+    && pip install --no-cache-dir -r requirements.txt \
     && seleniumbase install chromedriver
 
 COPY cdp_solver/service.py .
