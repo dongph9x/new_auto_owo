@@ -28,33 +28,45 @@ class IdentityManager:
         clean = clean.replace('\u200b', '').replace('\u200c', '').replace('\u200d', '').replace('\ufeff', '')
         return clean.lower().strip()
 
+    def _normalize(self, text):
+        """Decorative Discord nicknames often use Unicode "fancy font" letters
+        (Mathematical Alphanumeric Symbols etc.) that look like Latin letters but
+        don't share a lowercase mapping with them, so plain .lower() leaves them
+        untouched and identifier matching silently fails. NFKD decomposes them back
+        to their plain Latin base (e.g. "\ud835\udd72\ud835\udd8e\ud835\udd86\u0301\ud835\udd92" -> "Giam"), which we then lowercase
+        and strip punctuation from like before.
+        """
+        if not text: return ""
+        decomposed = unicodedata.normalize('NFKD', text)
+        no_marks = "".join(ch for ch in decomposed if not unicodedata.combining(ch))
+        return re.sub(r'[^\w\s]', '', no_marks.lower()).strip()
+
     def is_message_for_me(self, message, role="any", keyword=None):
         if not message: return False
-        
-        if self.bot.user.mentioned_in(message): 
+
+        if self.bot.user.mentioned_in(message):
             return True
         idents = [self.bot.user.name, self.bot.display_name] + getattr(self.bot, 'identifiers', [])
         clean_idents = set()
         for i in idents:
-            ci = re.sub(r'[^\w\s]', '', i.lower()).strip()
+            ci = self._normalize(i)
             if ci and len(ci) >= 2: clean_idents.add(ci)
-            
+
         if message.guild:
             member = message.guild.get_member(self.bot.user.id)
             if member and member.nick:
-                nick = member.nick.lower()
-                clean_nick = re.sub(r'[^\w\s]', '', nick).strip()
+                clean_nick = self._normalize(member.nick)
                 if clean_nick: clean_idents.add(clean_nick)
 
-        content = (message.content or "").lower()
+        content = self._normalize(message.content or "")
         if role == "header":
             first_line = content.split('\n')[0]
             header_texts = [first_line]
             if message.embeds:
                 for em in message.embeds:
-                    if em.title: header_texts.append(em.title.lower())
-                    if em.author and em.author.name: header_texts.append(em.author.name.lower())
-                    if em.description: header_texts.append(em.description.split('\n')[0].lower())
+                    if em.title: header_texts.append(self._normalize(em.title))
+                    if em.author and em.author.name: header_texts.append(self._normalize(em.author.name))
+                    if em.description: header_texts.append(self._normalize(em.description.split('\n')[0]))
             
             for text in header_texts:
                 for ident in clean_idents:
@@ -73,7 +85,7 @@ class IdentityManager:
         if message.embeds:
             for em in message.embeds:
                 fields_text = " ".join([f"{f.name} {f.value}" for f in em.fields])
-                texts.append(f"{em.title or ''} {em.author.name if em.author else ''} {em.description or ''} {fields_text}".lower())
+                texts.append(self._normalize(f"{em.title or ''} {em.author.name if em.author else ''} {em.description or ''} {fields_text}"))
 
         for text in texts:
             for ident in clean_idents:
