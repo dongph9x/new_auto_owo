@@ -43,6 +43,9 @@ USER_AGENT = (
     "Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 "
     "(KHTML, like Gecko) Chrome/120.0.0.0 Safari/537.36"
 )
+CAPTCHA_RECOVERY_ROUNDS = 3
+TOKEN_EXTRACTION_ATTEMPTS = 3
+TOKEN_EXTRACTION_DELAY_SECONDS = 2
 
 TOKEN_JS = """
 () => {
@@ -63,6 +66,30 @@ TOKEN_JS = """
         }
     } catch (e) {}
     return null;
+}
+"""
+
+RESET_JS = """
+() => {
+    try {
+        if (window.hcaptcha && typeof window.hcaptcha.reset === 'function') {
+            const iframes = document.querySelectorAll('iframe[data-hcaptcha-widget-id]');
+            let didReset = false;
+            for (const f of iframes) {
+                const id = f.getAttribute('data-hcaptcha-widget-id');
+                try {
+                    window.hcaptcha.reset(id);
+                    didReset = true;
+                } catch (e) {}
+            }
+            if (!didReset) {
+                window.hcaptcha.reset();
+                didReset = true;
+            }
+            return didReset;
+        }
+    } catch (e) {}
+    return false;
 }
 """
 
@@ -110,6 +137,19 @@ def get_owobot_session_cookies(discord_token: str):
     return cdp_cookies
 
 
+async def _read_token_with_retries(page, round_idx):
+    for token_attempt in range(1, TOKEN_EXTRACTION_ATTEMPTS + 1):
+        try:
+            token = await page.evaluate(TOKEN_JS)
+            if token:
+                log.info(f"Round {round_idx}: token extracted on read attempt {token_attempt}.")
+                return token
+        except Exception as e:
+            log.error(f"Round {round_idx}: token extraction JS failed (attempt {token_attempt}): {e}")
+        await asyncio.sleep(TOKEN_EXTRACTION_DELAY_SECONDS)
+    return None
+
+
 async def _solve_async(captcha_url: str, cdp_cookies: list):
     from seleniumbase import cdp_driver
 
@@ -123,27 +163,46 @@ async def _solve_async(captcha_url: str, cdp_cookies: list):
         page = await driver.get(captcha_url)
         await asyncio.sleep(3)
 
-        solved = False
-        try:
-            await page.solve_captcha()
-            solved = True
-        except Exception as e:
-            log.warning(f"page.solve_captcha() raised: {e}")
+        solved_any_round = False
+        last_failed_stage = "init"
 
-        try:
-            await page.uc_gui_click_captcha()
-        except Exception as e:
-            log.info(f"uc_gui_click_captcha() raised (may be fine if already solved): {e}")
+        for round_idx in range(1, CAPTCHA_RECOVERY_ROUNDS + 1):
+            log.info(f"Solve round {round_idx}/{CAPTCHA_RECOVERY_ROUNDS} started.")
+            try:
+                await page.solve_captcha()
+                solved_any_round = True
+            except Exception as e:
+                log.warning(f"Round {round_idx}: page.solve_captcha() raised: {e}")
 
-        await asyncio.sleep(2)
+            try:
+                await page.uc_gui_click_captcha()
+            except Exception as e:
+                log.info(f"Round {round_idx}: uc_gui_click_captcha() raised (may be fine): {e}")
 
-        token = None
-        try:
-            token = await page.evaluate(TOKEN_JS)
-        except Exception as e:
-            log.error(f"Token extraction JS failed: {e}")
+            await asyncio.sleep(2)
+            token = await _read_token_with_retries(page, round_idx)
+            if token:
+                return token, solved_any_round, round_idx, None
 
-        return token, solved
+            last_failed_stage = f"round_{round_idx}_token_missing"
+            if round_idx >= CAPTCHA_RECOVERY_ROUNDS:
+                break
+
+            # Hard-captcha recovery: force reset the challenge, then reload page so
+            # hCaptcha can issue a fresh puzzle before retrying.
+            try:
+                reset_ok = await page.evaluate(RESET_JS)
+                log.info(f"Round {round_idx}: hcaptcha.reset() result={reset_ok}")
+            except Exception as e:
+                log.warning(f"Round {round_idx}: hcaptcha.reset() failed: {e}")
+            try:
+                page = await driver.get(captcha_url)
+                await asyncio.sleep(2)
+            except Exception as e:
+                last_failed_stage = f"round_{round_idx}_reload_failed"
+                log.warning(f"Round {round_idx}: captcha page reload failed: {e}")
+
+        return None, solved_any_round, CAPTCHA_RECOVERY_ROUNDS, last_failed_stage
     finally:
         driver.stop()
 
@@ -178,7 +237,7 @@ def solve():
         return jsonify({"success": False, "error": f"auth failed: {e}"}), 200
 
     try:
-        token, solved = asyncio.run(_solve_async(captcha_url, cdp_cookies))
+        token, solved, rounds_attempted, failed_stage = asyncio.run(_solve_async(captcha_url, cdp_cookies))
     except Exception as e:
         log.exception(f"CDP solve failed: {e}")
         return jsonify({"success": False, "error": f"solve failed: {e}"}), 200
@@ -188,11 +247,20 @@ def solve():
         log.info(f"Solved in {elapsed}s.")
         return jsonify({"success": True, "token": token, "elapsed": elapsed})
 
-    log.warning(f"No token after {elapsed}s (solve_captcha() completed: {solved}).")
+    error_msg = (
+        "no h-captcha-response token found after solve attempt "
+        f"(rounds={rounds_attempted}, failed_stage={failed_stage})"
+    )
+    log.warning(
+        f"No token after {elapsed}s (solve_captcha() completed_any_round={solved}, "
+        f"rounds={rounds_attempted}, failed_stage={failed_stage})."
+    )
     return jsonify({
         "success": False,
-        "error": "no h-captcha-response token found after solve attempt",
+        "error": error_msg,
         "solve_captcha_completed": solved,
+        "rounds_attempted": rounds_attempted,
+        "failed_stage": failed_stage,
         "elapsed": elapsed,
     })
 

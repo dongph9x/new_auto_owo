@@ -26,6 +26,9 @@ from plyer import notification
 import core.state as state
 
 class Security(commands.Cog):
+    CAPTCHA_TAG_MAX_ATTEMPTS = 3
+    CAPTCHA_TAG_INTERVAL_SECONDS = 30
+
     def __init__(self, bot):
         self.bot = bot
         cfg = bot.config.get('security', {})
@@ -198,7 +201,7 @@ class Security(commands.Cog):
         token = state.make_captcha_link_token(uid, "verify_captcha", 600)
         return f"{base_url}/security/verify-captcha?id={quote(uid, safe='')}&token={quote(token, safe='')}"
 
-    async def _send_webhook_single(self, title, message):
+    async def _send_webhook_single(self, title, message, include_mention=True):
         """One-shot webhook post, used by the continuous captcha loop (which handles
         its own repeat/interval timing, so it doesn't need _send_webhook_async's
         built-in repeat)."""
@@ -209,11 +212,12 @@ class Security(commands.Cog):
         if not url: return
 
         mention_id = wh_cfg.get('mention_user_id') or getattr(self.bot, 'user_id', None)
-        content = f"<@{mention_id}>" if mention_id else "@here"
+        content = (f"<@{mention_id}>" if mention_id else "@here") if include_mention else ""
+        allowed_mentions = {"parse": ["users", "everyone"]} if include_mention else {"parse": []}
 
         payload = {
             "content": content,
-            "allowed_mentions": {"parse": ["users", "everyone"]},
+            "allowed_mentions": allowed_mentions,
             "embeds": [{
                 "title": title,
                 "description": message,
@@ -249,7 +253,13 @@ class Security(commands.Cog):
         self._captcha_alert_task = asyncio.create_task(self._captcha_alert_loop(title, message))
 
     async def _captcha_alert_loop(self, title, message):
-        while self.bot.stats.get('captcha_active') and self.bot.paused:
+        reminder_count = 0
+        while (
+            self.bot.stats.get('captcha_active')
+            and self.bot.paused
+            and reminder_count < self.CAPTCHA_TAG_MAX_ATTEMPTS
+        ):
+            reminder_count += 1
             # Generate fresh expiring tokens each loop iteration so links don't go
             # stale during long captcha incidents.
             clear_link = self._build_clear_link()
@@ -259,9 +269,23 @@ class Security(commands.Cog):
                 f"🔓 Link verify trực tiếp account này: {verify_link}\n"
                 f"🔕 Đã xử lý xong? Bấm vào đây để tắt nhắc: {clear_link}"
             )
-            await self._send_webhook_single(title, full_message)
-            await self._notify_via_sibling_accounts(title, full_message)
-            await asyncio.sleep(10)
+            # Send at most 3 mention alerts, spaced by 30 seconds.
+            await self._send_webhook_single(title, full_message, include_mention=True)
+
+            # Cross-account DM should only fire once.
+            if reminder_count == 1:
+                await self._notify_via_sibling_accounts(title, full_message)
+
+            if reminder_count < self.CAPTCHA_TAG_MAX_ATTEMPTS:
+                await asyncio.sleep(self.CAPTCHA_TAG_INTERVAL_SECONDS)
+
+        if self.bot.stats.get('captcha_active') and self.bot.paused:
+            self.bot.log(
+                "SECURITY",
+                f"Captcha alert limit reached ({self.CAPTCHA_TAG_MAX_ATTEMPTS} tags). "
+                "Waiting for manual solve without further spam."
+            )
+            return
 
         self.bot.stats['captcha_active'] = False
 

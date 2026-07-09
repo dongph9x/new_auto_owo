@@ -301,6 +301,16 @@ class WebSolver:
         if any(m in text for m in upstream_markers):
             return "retry_primary_no_secondary"
 
+        # Provider-side throttling/transient backend errors should retry primary
+        # before switching to secondary.
+        if "http 429" in text:
+            return "retry_primary_then_secondary"
+        http_code_match = re.search(r"http\s+(\d{3})", text)
+        if http_code_match:
+            code = int(http_code_match.group(1))
+            if 500 <= code <= 599:
+                return "retry_primary_then_secondary"
+
         provider_connect_markers = [
             "could not reach",
             "cannot connect",

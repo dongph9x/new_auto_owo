@@ -54,15 +54,30 @@ def load_accounts():
         return []
 
 
+def _is_admin_user(user_id: int | str) -> bool:
+    """A Discord user is admin if they own any account with role=admin."""
+    uid = str(user_id)
+    for a in load_accounts():
+        if str(a.get("dc_user_id", "")).strip() == uid and str(a.get("role", "user")).lower() == "admin":
+            return True
+    return False
+
+
+def can_manage_account(user_id: int | str, account: dict) -> bool:
+    uid = str(user_id)
+    owner_id = str(account.get("dc_user_id", "")).strip()
+    # Owner can manage their own account; any admin-role owner can manage all.
+    return (owner_id and owner_id == uid) or _is_admin_user(uid)
+
+
 def accounts_manageable_by(user_id: int):
-    """Each NeuraSelf account belongs to exactly one Discord user — the one whose
-    ID matches its "dc_user_id" in accounts.json."""
-    return [a for a in load_accounts() if str(a.get("dc_user_id", "")) == str(user_id)]
+    """Accounts this user can manage: owner or admin-role owner."""
+    return [a for a in load_accounts() if can_manage_account(user_id, a)]
 
 
 def is_allowed_for_account(interaction: discord.Interaction, account_name: str) -> bool:
     account = next((a for a in load_accounts() if a.get("name") == account_name), None)
-    return bool(account) and str(account.get("dc_user_id", "")) == str(interaction.user.id)
+    return bool(account) and can_manage_account(interaction.user.id, account)
 
 
 async def account_autocomplete(interaction: discord.Interaction, current: str):
