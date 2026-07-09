@@ -19,6 +19,7 @@ RUN pip install --no-cache-dir \
         plyer==2.1.0 \
         playsound3==3.3.0 \
         python-dotenv==1.2.1 \
+        cryptography \
         numpy \
         pillow \
         onnxruntime
