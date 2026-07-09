@@ -48,8 +48,9 @@ def _captcha_link_token(account_id, action, ttl_seconds=600):
 
 
 def _captcha_token_is_valid(account_id, action, token):
-    """Validate one-time captcha link token."""
-    ok, _reason = state.consume_captcha_link_token(account_id, action, token)
+    """Validate captcha link token."""
+    clean_token = (token or "").strip().strip("<>").strip()
+    ok, _reason = state.consume_captcha_link_token(account_id, action, clean_token, consume=False)
     return ok
 
 
@@ -629,15 +630,30 @@ def security():
 
     return jsonify({'success': True})
 
-@app.route('/security/clear-captcha')
+@app.route('/security/clear-captcha', methods=['GET', 'POST'])
 def clear_captcha_alert():
-    """One-click link sent in the repeating captcha-alert DM. No login required —
-    it's protected instead by an unguessable HMAC token so it works straight from a
-    phone notification without having to sign into the dashboard first."""
-    account_id = request.args.get('id')
-    token = request.args.get('token')
+    """Two-step clear link: GET shows confirmation, POST performs action.
+    Prevents link-preview crawlers from accidentally consuming one-time tokens."""
+    account_id = request.values.get('id')
+    token = request.values.get('token')
     if not account_id or not token:
         return "Invalid link.", 400
+
+    if request.method == 'GET':
+        if not _captcha_token_is_valid(account_id, "clear_alert", token):
+            return "Invalid or expired link.", 403
+        return f"""
+        <html><body style="font-family:sans-serif;text-align:center;padding-top:60px;background:#111;color:#eee;">
+            <h2>Xac nhan tat canh bao captcha?</h2>
+            <form method="POST" action="/security/clear-captcha">
+                <input type="hidden" name="id" value="{account_id}">
+                <input type="hidden" name="token" value="{token}">
+                <button type="submit" style="background:#16a34a;color:#fff;border:0;padding:12px 20px;border-radius:8px;cursor:pointer;">
+                    Tat canh bao
+                </button>
+            </form>
+        </body></html>
+        """
 
     if not _captcha_token_is_valid(account_id, "clear_alert", token):
         return "Invalid or expired link.", 403
@@ -654,15 +670,31 @@ def clear_captcha_alert():
     """
 
 
-@app.route('/security/verify-captcha')
+@app.route('/security/verify-captcha', methods=['GET', 'POST'])
 def verify_captcha_via_link():
-    """One-click account-specific captcha verify link.
-    No dashboard login required — protected by HMAC token so it can be shared
-    to helpers and opened directly from any device/browser."""
-    account_id = request.args.get('id')
-    token = request.args.get('token')
+    """Two-step verify link: GET shows confirmation, POST opens OwO verify flow.
+    Prevents link-preview crawlers from accidentally consuming one-time tokens."""
+    account_id = request.values.get('id')
+    token = request.values.get('token')
     if not account_id or not token:
         return "Invalid link.", 400
+
+    if request.method == 'GET':
+        if not _captcha_token_is_valid(account_id, "verify_captcha", token):
+            return "Invalid or expired link.", 403
+        return f"""
+        <html><body style="font-family:sans-serif;text-align:center;padding-top:60px;background:#111;color:#eee;">
+            <h2>Xac nhan mo trang verify captcha?</h2>
+            <p style="color:#bbb">Link nay chi dung 1 lan va het han sau 10 phut.</p>
+            <form method="POST" action="/security/verify-captcha">
+                <input type="hidden" name="id" value="{account_id}">
+                <input type="hidden" name="token" value="{token}">
+                <button type="submit" style="background:#2563eb;color:#fff;border:0;padding:12px 20px;border-radius:8px;cursor:pointer;">
+                    Mo trang verify
+                </button>
+            </form>
+        </body></html>
+        """
 
     if not _captcha_token_is_valid(account_id, "verify_captcha", token):
         return "Invalid or expired link.", 403

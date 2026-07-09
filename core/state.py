@@ -92,23 +92,11 @@ def captcha_clear_token(account_id):
     return hmac.new(secret, str(account_id).encode(), hashlib.sha256).hexdigest()[:20]
 
 
-# In-memory replay protection for one-time captcha action links. A token's nonce
-# is marked used after first successful validation until its own expiry time.
-_CAPTCHA_LINK_USED_NONCES = {}
-
-
 def _captcha_links_fernet():
     """Derive a stable Fernet key from dashboard secret_key."""
     secret = get_dashboard_secret().encode()
     key_bytes = hashlib.sha256(secret + b":captcha-links:v1").digest()
     return Fernet(base64.urlsafe_b64encode(key_bytes))
-
-
-def _cleanup_used_captcha_nonces(now_ts=None):
-    now_ts = int(now_ts or time.time())
-    stale = [nonce for nonce, exp in _CAPTCHA_LINK_USED_NONCES.items() if exp <= now_ts]
-    for nonce in stale:
-        _CAPTCHA_LINK_USED_NONCES.pop(nonce, None)
 
 
 def make_captcha_link_token(account_id, action, ttl_seconds=600):
@@ -127,14 +115,14 @@ def make_captcha_link_token(account_id, action, ttl_seconds=600):
     return _captcha_links_fernet().encrypt(raw).decode()
 
 
-def consume_captcha_link_token(account_id, action, token):
-    """Validate and consume encrypted captcha-link token once.
-    Returns (ok: bool, reason: str|None)."""
+def consume_captcha_link_token(account_id, action, token, consume=False):
+    """Validate encrypted captcha-link token.
+    Token is TTL-bound, not one-time, to avoid false invalidation caused by
+    chat-app link previews and prefetchers touching the link before the user."""
     if not token:
         return False, "missing token"
 
     now_ts = int(time.time())
-    _cleanup_used_captcha_nonces(now_ts)
 
     try:
         raw = _captcha_links_fernet().decrypt(token.encode())
@@ -153,13 +141,6 @@ def consume_captcha_link_token(account_id, action, token):
     if exp < now_ts:
         return False, "expired token"
 
-    nonce = str(payload.get("nonce", "")).strip()
-    if not nonce:
-        return False, "missing nonce"
-    if nonce in _CAPTCHA_LINK_USED_NONCES:
-        return False, "token already used"
-
-    _CAPTCHA_LINK_USED_NONCES[nonce] = exp
     return True, None
 
 def save_account_stats():

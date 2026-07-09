@@ -19,6 +19,7 @@ import unicodedata
 import requests
 import aiohttp
 import json
+from urllib.parse import quote
 import discord
 from discord.ext import commands
 from plyer import notification
@@ -188,14 +189,14 @@ class Security(commands.Cog):
         base_url = (cfg.get('dashboard_url') or 'http://localhost:8000').rstrip('/')
         uid = str(self.bot.user_id)
         token = state.make_captcha_link_token(uid, "clear_alert", 600)
-        return f"{base_url}/security/clear-captcha?id={uid}&token={token}"
+        return f"{base_url}/security/clear-captcha?id={quote(uid, safe='')}&token={quote(token, safe='')}"
 
     def _build_verify_link(self):
         cfg = self.bot.config.get('security', {})
         base_url = (cfg.get('dashboard_url') or 'http://localhost:8000').rstrip('/')
         uid = str(self.bot.user_id)
         token = state.make_captcha_link_token(uid, "verify_captcha", 600)
-        return f"{base_url}/security/verify-captcha?id={uid}&token={token}"
+        return f"{base_url}/security/verify-captcha?id={quote(uid, safe='')}&token={quote(token, safe='')}"
 
     async def _send_webhook_single(self, title, message):
         """One-shot webhook post, used by the continuous captcha loop (which handles
