@@ -46,6 +46,8 @@ class WebSolver:
     # retry the whole verify flow (before triggering manual DM/webhook alerts).
     OWO_ACCESS_RETRY_ATTEMPTS = 3
     OWO_ACCESS_RETRY_DELAY_SECONDS = 60
+    PRIMARY_PROVIDER_RETRY_ATTEMPTS = 3
+    PRIMARY_PROVIDER_RETRY_DELAY_SECONDS = 60
 
     def __init__(self, bot):
         self.bot = bot
@@ -73,6 +75,44 @@ class WebSolver:
         self.provider_2nd = cfg.get('provider_2nd') or None
         self.api_key_2nd = cfg.get('api_key_2nd', '')
         self.max_retry_seconds_2nd = cfg.get('max_retry_seconds_2nd', self.max_retry_seconds)
+        self._diagnostic_steps = []
+        self._diag_started_at = 0.0
+        self._diag_step_no = 0
+        self._diag_failure_point = ""
+
+    def _mask_secret(self, value):
+        v = str(value or "")
+        if len(v) <= 8:
+            return "***" if v else "(empty)"
+        return f"{v[:4]}...{v[-4:]}"
+
+    def _diag(self, message):
+        if not self._diag_started_at:
+            self._diag_started_at = time.time()
+        self._diag_step_no += 1
+        elapsed = time.time() - self._diag_started_at
+        self._diagnostic_steps.append(f"+{elapsed:.1f}s [S{self._diag_step_no}] {message}")
+        if len(self._diagnostic_steps) > 40:
+            self._diagnostic_steps = self._diagnostic_steps[-40:]
+
+    def _set_failure_point(self, step, reason=None):
+        self._diag_failure_point = step
+        if reason:
+            self._diag(f"FAIL@{step}: {reason}")
+        else:
+            self._diag(f"FAIL@{step}")
+
+    def get_last_diagnostic_summary(self, max_chars=700):
+        if not self._diagnostic_steps:
+            return ""
+        total_elapsed = (time.time() - self._diag_started_at) if self._diag_started_at else 0.0
+        prefix = f"elapsed={total_elapsed:.1f}s"
+        if self._diag_failure_point:
+            prefix += f" fail_step={self._diag_failure_point}"
+        text = f"{prefix} || " + " | ".join(self._diagnostic_steps)
+        if len(text) <= max_chars:
+            return text
+        return "..." + text[-max_chars:]
 
     def _provider_cfg(self):
         return CAPTCHA_PROVIDERS.get(self.provider, CAPTCHA_PROVIDERS["nopecha"])
@@ -104,6 +144,7 @@ class WebSolver:
             deadline = time.time() + self.max_retry_seconds
 
         prov = self._provider_cfg()
+        self._diag(f"solve_hcaptcha provider={self.provider} retries={retries}")
         if self.provider == "nopecha":
             return await self._solve_hcaptcha_nopecha(prov, retries, deadline)
 
@@ -130,19 +171,23 @@ class WebSolver:
                     break
                 try:
                     self.bot.log("SYS", f"Creating {self.provider} task (Attempt {attempt+1}/{retries})...")
+                    self._diag(f"{self.provider} createTask attempt={attempt+1}")
                     async with session.post(create_url, json=payload) as resp:
                         if resp.status != 200:
                             last_error = f"createTask returned HTTP {resp.status}"
                             self.bot.log("ERROR", f"{self.provider}: {last_error}")
+                            self._diag(f"{self.provider} createTask http={resp.status}")
                             continue
                         data = await resp.json()
 
                     if data.get("errorId") != 0:
                         last_error = f"createTask error: {data.get('errorDescription') or data.get('errorId')}"
                         self.bot.log("ERROR", f"{self.provider}: {last_error}")
+                        self._diag(f"{self.provider} createTask err={data.get('errorDescription') or data.get('errorId')}")
                         continue
 
                     task_id = data.get("taskId")
+                    self._diag(f"{self.provider} task_id={task_id}")
                     poll_outcome = "timeout"
                     while time.time() < deadline:
                         await asyncio.sleep(2)
@@ -150,19 +195,23 @@ class WebSolver:
                             res = await res_resp.json()
 
                         if res.get("status") == "ready":
+                            self._diag(f"{self.provider} task ready")
                             return res["solution"]["gRecaptchaResponse"], None
                         if res.get("errorId") != 0:
                             last_error = f"getTaskResult error: {res.get('errorDescription') or res.get('errorId')}"
                             self.bot.log("ERROR", f"{self.provider}: {last_error}")
+                            self._diag(f"{self.provider} poll err={res.get('errorDescription') or res.get('errorId')}")
                             poll_outcome = "error"
                             break
                     if poll_outcome == "timeout":
                         last_error = f"gave up: exceeded the {self.max_retry_seconds}s retry budget while polling"
                         self.bot.log("WARN", f"{self.provider}: {last_error}")
+                        self._diag(f"{self.provider} poll timeout budget={self.max_retry_seconds}s")
                         break
                 except Exception as e:
                     last_error = str(e)
                     self.bot.log("ERROR", f"{self.provider}: solver task failed: {last_error}")
+                    self._diag(f"{self.provider} exception={last_error}")
             return None, last_error
 
     async def _solve_hcaptcha_nopecha(self, prov, retries=3, deadline=None):
@@ -191,10 +240,12 @@ class WebSolver:
                     break
                 try:
                     self.bot.log("SYS", f"Creating nopecha task (Attempt {attempt+1}/{retries})...")
+                    self._diag(f"nopecha create attempt={attempt+1} key={self._mask_secret(self.api_key)}")
                     async with session.post(url, json=payload) as resp:
                         if resp.status != 200:
                             last_error = f"token/ create returned HTTP {resp.status}"
                             self.bot.log("ERROR", f"nopecha: {last_error}")
+                            self._diag(f"nopecha create http={resp.status}")
                             continue
                         data = await resp.json()
 
@@ -202,8 +253,10 @@ class WebSolver:
                     if not job_id:
                         last_error = f"task rejected: {data.get('message') or data.get('error') or data}"
                         self.bot.log("ERROR", f"nopecha: {last_error}")
+                        self._diag(f"nopecha rejected={data.get('message') or data.get('error')}")
                         continue
 
+                    self._diag(f"nopecha job_id={job_id}")
                     poll_outcome = "timeout"
                     while time.time() < deadline:
                         await asyncio.sleep(2)
@@ -211,82 +264,135 @@ class WebSolver:
                             res = await res_resp.json()
 
                         if res.get("data"):
+                            self._diag("nopecha ready")
                             return res["data"], None
                         if res.get("error") is not None and res.get("error") != 14:
                             last_error = f"job failed: error {res.get('error')} - {res.get('message', '')}".strip(" -")
                             self.bot.log("ERROR", f"nopecha: {last_error}")
+                            self._diag(f"nopecha poll err={res.get('error')}:{res.get('message', '')}")
                             poll_outcome = "error"
                             break
                     if poll_outcome == "timeout":
                         last_error = f"gave up: exceeded the {self.max_retry_seconds}s retry budget while polling"
                         self.bot.log("WARN", f"nopecha: {last_error}")
+                        self._diag(f"nopecha poll timeout budget={self.max_retry_seconds}s")
                         break
                 except Exception as e:
                     last_error = str(e)
                     self.bot.log("ERROR", f"nopecha: solver task failed: {last_error}")
+                    self._diag(f"nopecha exception={last_error}")
             return None, last_error
 
-    def _is_owobot_access_issue(self, reason):
-        """Best-effort classifier for transient access/connectivity failures where
-        retrying the whole verification flow later often succeeds."""
+    def _failure_policy(self, reason):
+        """Decide what to do after primary failure.
+        Returns one of:
+        - retry_primary_then_secondary: retry primary for transient provider-connect errors
+          then fallback to secondary if still failing.
+        - retry_primary_no_secondary: retry primary for upstream OwO/Discord verify path
+          issues, and stop without secondary (secondary is useless in this case).
+        - switch_secondary_now: don't wait; primary exhausted/non-transient solve failure."""
         text = (reason or "").lower()
-        access_markers = [
+
+        upstream_markers = [
             "discord oauth authorize failed",
             "owobot verify endpoint returned http",
             "verify request failed",
-            "could not reach cdp-solver service",
+        ]
+        if any(m in text for m in upstream_markers):
+            return "retry_primary_no_secondary"
+
+        provider_connect_markers = [
+            "could not reach",
+            "cannot connect",
+            "name or service not known",
             "server disconnected",
-            "connection reset",
             "connection refused",
+            "connection reset",
             "temporarily unavailable",
             "timeout",
             "timed out",
-            "name or service not known",
-            "cannot connect",
         ]
-        return any(marker in text for marker in access_markers)
+        if any(m in text for m in provider_connect_markers):
+            return "retry_primary_then_secondary"
+
+        return "switch_secondary_now"
 
     async def auto_verify(self, tries=3):
-        """Tries primary/secondary providers; on transient OwO/Discord/CDP access
-        failures, retries the whole flow every minute (max 3 rounds) before
-        giving up. Returns (success: bool, reason: str|None)."""
-        last_reason = None
-        for round_idx in range(1, self.OWO_ACCESS_RETRY_ATTEMPTS + 1):
-            ok, reason = await self._auto_verify_once(tries)
+        """Primary-first verification policy:
+        - Retry primary NopeCHA/provider-connect failures every 60s up to 3 rounds.
+          If still failing, fallback to secondary (CDP) when configured.
+        - Retry upstream OwO/Discord verify-path failures up to 3 rounds, then stop
+          without secondary (secondary would hit the same upstream).
+        - For non-transient primary solve failures, switch to secondary immediately."""
+        self._diagnostic_steps = []
+        self._diag_started_at = time.time()
+        self._diag_step_no = 0
+        self._diag_failure_point = ""
+        self._diag(
+            f"auto_verify start provider={self.provider} key={self._mask_secret(self.api_key)} "
+            f"secondary={self.provider_2nd or '-'} key2={self._mask_secret(self.api_key_2nd)}"
+        )
+        last_reason = "unknown error"
+        policy = "switch_secondary_now"
+
+        # Stage 1: primary provider attempts (with conditional retries).
+        for round_idx in range(1, self.PRIMARY_PROVIDER_RETRY_ATTEMPTS + 1):
+            self._diag(f"primary round={round_idx}/{self.PRIMARY_PROVIDER_RETRY_ATTEMPTS}")
+            ok, reason = await self._auto_verify_single(tries)
             if ok:
+                self._diag("auto_verify success")
                 return True, None
 
-            last_reason = reason
-            if round_idx >= self.OWO_ACCESS_RETRY_ATTEMPTS:
-                break
-            if not self._is_owobot_access_issue(reason):
+            last_reason = reason or "unknown error"
+            policy = self._failure_policy(last_reason)
+            self._diag(f"primary failed: {last_reason} policy={policy}")
+
+            if policy == "switch_secondary_now":
                 break
 
-            self.bot.log(
-                "WARN",
-                f"Captcha verify flow failed due to likely access issue: {reason}. "
-                f"Retrying in {self.OWO_ACCESS_RETRY_DELAY_SECONDS}s "
-                f"({round_idx}/{self.OWO_ACCESS_RETRY_ATTEMPTS})..."
+            if round_idx >= self.PRIMARY_PROVIDER_RETRY_ATTEMPTS:
+                break
+
+            retry_delay = self.PRIMARY_PROVIDER_RETRY_DELAY_SECONDS
+            if policy == "retry_primary_no_secondary":
+                self.bot.log(
+                    "WARN",
+                    f"{self.provider}: upstream verify path issue ({last_reason}). "
+                    f"Retrying primary in {retry_delay}s "
+                    f"({round_idx}/{self.PRIMARY_PROVIDER_RETRY_ATTEMPTS})..."
+                )
+            else:
+                self.bot.log(
+                    "WARN",
+                    f"{self.provider}: transient provider-connect issue ({last_reason}). "
+                    f"Retrying primary in {retry_delay}s "
+                    f"({round_idx}/{self.PRIMARY_PROVIDER_RETRY_ATTEMPTS})..."
+                )
+            await asyncio.sleep(retry_delay)
+
+        # If upstream verify path is down after retries, stop here (don't waste CDP).
+        if policy == "retry_primary_no_secondary":
+            reason = (
+                f"{self.provider}: upstream verify path still failing after "
+                f"{self.PRIMARY_PROVIDER_RETRY_ATTEMPTS} attempt(s): {last_reason}. "
+                f"Secondary skipped because it uses the same OwO/Discord verify path."
             )
-            await asyncio.sleep(self.OWO_ACCESS_RETRY_DELAY_SECONDS)
+            self._diag("secondary skipped due to upstream outage")
+            self._set_failure_point("PRIMARY_UPSTREAM_OUTAGE", reason)
+            return False, reason
 
-        return False, last_reason
-
-    async def _auto_verify_once(self, tries=3):
-        """Single round: primary provider, then secondary provider if configured."""
-        ok, reason = await self._auto_verify_single(tries)
-        if ok or not self.provider_2nd:
-            return ok, reason
+        # Stage 2: fallback secondary provider if configured.
+        if not self.provider_2nd:
+            self._diag("secondary not configured")
+            self._set_failure_point("PRIMARY_FAILED_NO_SECONDARY", last_reason)
+            return False, last_reason
 
         self.bot.log(
             "SYS",
-            f"{self.provider}: primary provider failed ({reason}). "
+            f"{self.provider}: primary provider failed ({last_reason}). "
             f"Trying secondary provider {self.provider_2nd}..."
         )
 
-        # Swap in the secondary provider's settings for one attempt, then restore —
-        # this bot processes one captcha at a time per account, so there's no
-        # concurrent auto_verify() call that this swap could interfere with.
         orig = (self.provider, self.api_key, self.max_retry_seconds)
         try:
             self.provider = self.provider_2nd
@@ -297,25 +403,36 @@ class WebSolver:
             self.provider, self.api_key, self.max_retry_seconds = orig
 
         if ok2:
+            self._diag("secondary success")
             return True, None
-        return False, f"primary({orig[0]}): {reason}; secondary({self.provider_2nd}): {reason2}"
+
+        self._diag(f"secondary failed: {reason2}")
+        final_reason = f"primary({orig[0]}): {last_reason}; secondary({self.provider_2nd}): {reason2}"
+        self._set_failure_point("SECONDARY_FAILED", final_reason)
+        return False, final_reason
 
     async def _auto_verify_single(self, tries=3):
         """One provider attempt, using whatever self.provider/self.api_key currently
         are — see auto_verify() for the primary/secondary orchestration around this."""
         if self.provider == "cdp_local":
+            self._diag("provider cdp_local path")
             return await self._auto_verify_cdp_local()
 
         if not self.api_key:
             reason = "API key missing in settings"
             self.bot.log("ERROR", f"{self.provider}: {reason}.")
+            self._diag(f"{self.provider} no api key")
+            self._set_failure_point("API_KEY_MISSING", reason)
             return False, reason
 
         balance = await self.get_balance()
         min_balance = self._provider_cfg()["min_balance"]
+        self._diag(f"{self.provider} balance={balance} min_required={min_balance}")
         if balance < min_balance:
             reason = f"balance too low ({balance} < {min_balance} required)"
             self.bot.log("ERROR", f"{self.provider}: {reason}")
+            self._diag(f"{self.provider} balance low")
+            self._set_failure_point("BALANCE_CHECK", reason)
             return False, reason
 
         headers = {
@@ -336,9 +453,12 @@ class WebSolver:
                     if resp.status != 200:
                         reason = f"Discord OAuth authorize failed (HTTP {resp.status})"
                         self.bot.log("ERROR", f"{self.provider}: {reason}")
+                        self._diag(f"{self.provider} oauth http={resp.status}")
+                        self._set_failure_point("DISCORD_OAUTH", reason)
                         return False, reason
                     auth_data = await resp.json()
                     redirect_url = auth_data.get("location")
+                    self._diag(f"{self.provider} oauth ok redirect={'yes' if bool(redirect_url) else 'no'}")
 
                 if redirect_url:
                     async with session.get(redirect_url) as r: pass
@@ -346,19 +466,26 @@ class WebSolver:
                 solution, solve_reason = await self.solve_hcaptcha(tries)
                 if not solution:
                     reason = f"failed to solve after {tries} attempt(s): {solve_reason}"
+                    self._diag(f"{self.provider} solve failed: {solve_reason}")
+                    self._set_failure_point("PROVIDER_SOLVE", reason)
                     return False, reason
 
                 verify_url = "https://owobot.com/api/captcha/verify"
                 verify_payload = {"token": solution}
                 async with session.post(verify_url, json=verify_payload, headers={"Referer": "https://owobot.com/captcha", "Origin": "https://owobot.com"}) as v_resp:
                     if v_resp.status == 200:
+                        self._diag(f"{self.provider} verify ok")
                         return True, None
                     reason = f"owobot verify endpoint returned HTTP {v_resp.status}"
                     self.bot.log("ERROR", f"{self.provider}: {reason}")
+                    self._diag(f"{self.provider} verify http={v_resp.status}")
+                    self._set_failure_point("OWO_VERIFY_HTTP", reason)
                     return False, reason
             except Exception as e:
                 reason = str(e)
                 self.bot.log("ERROR", f"{self.provider}: auto-verification failed: {reason}")
+                self._diag(f"{self.provider} auto_verify exception={reason}")
+                self._set_failure_point("AUTO_VERIFY_EXCEPTION", reason)
                 return False, reason
 
     async def _auto_verify_cdp_local(self):
@@ -366,6 +493,7 @@ class WebSolver:
         no paid API) to solve the captcha, then submit the resulting token to
         owobot exactly like the API-based providers do."""
         self.bot.log("SYS", f"cdp_local: requesting solve from {self.cdp_solver_url} ...")
+        self._diag(f"cdp_local call solve url={self.cdp_solver_url}/solve")
         data = None
         last_err = None
         request_timeout = aiohttp.ClientTimeout(total=self.max_retry_seconds + 30)
@@ -382,27 +510,36 @@ class WebSolver:
                         if resp.status != 200:
                             reason = f"cdp-solver service returned HTTP {resp.status}"
                             self.bot.log("ERROR", f"cdp_local: {reason}")
+                            self._diag(f"cdp_local solve http={resp.status}")
+                            self._set_failure_point("CDP_SOLVE_HTTP", reason)
                             return False, reason
                         data = await resp.json()
+                        self._diag(f"cdp_local solve response success={bool(data.get('success'))}")
                         break
             except Exception as e:
                 last_err = e
                 if attempt == 0:
                     self.bot.log("WARN", f"cdp_local: transient solve request error (attempt 1/2): {e}")
+                    self._diag(f"cdp_local transient err={e}")
                     await asyncio.sleep(1.5)
                 else:
                     reason = f"could not reach cdp-solver service: {e}"
                     self.bot.log("ERROR", f"cdp_local: {reason}")
+                    self._diag(f"cdp_local reach failed={e}")
+                    self._set_failure_point("CDP_CONNECT", reason)
                     return False, reason
 
         if data is None:
             reason = f"could not reach cdp-solver service: {last_err or 'unknown error'}"
             self.bot.log("ERROR", f"cdp_local: {reason}")
+            self._set_failure_point("CDP_CONNECT", reason)
             return False, reason
 
         if not data.get("success") or not data.get("token"):
             reason = data.get("error") or "cdp-solver did not return a token"
             self.bot.log("ERROR", f"cdp_local: {reason}")
+            self._diag(f"cdp_local token missing err={reason}")
+            self._set_failure_point("CDP_TOKEN_MISSING", reason)
             return False, reason
 
         solution = data["token"]
@@ -420,13 +557,18 @@ class WebSolver:
                     headers={"Referer": "https://owobot.com/captcha", "Origin": "https://owobot.com"},
                 ) as v_resp:
                     if v_resp.status == 200:
+                        self._diag("cdp_local verify ok")
                         return True, None
                     reason = f"owobot verify endpoint returned HTTP {v_resp.status}"
                     self.bot.log("ERROR", f"cdp_local: {reason}")
+                    self._diag(f"cdp_local verify http={v_resp.status}")
+                    self._set_failure_point("OWO_VERIFY_HTTP", reason)
                     return False, reason
         except Exception as e:
             reason = f"verify request failed: {e}"
             self.bot.log("ERROR", f"cdp_local: {reason}")
+            self._diag(f"cdp_local verify exception={e}")
+            self._set_failure_point("OWO_VERIFY_EXCEPTION", reason)
             return False, reason
 
     async def fetch_battle_log(self, uuid):

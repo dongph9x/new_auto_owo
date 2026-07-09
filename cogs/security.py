@@ -377,11 +377,11 @@ class Security(commands.Cog):
                 if not autosolved:
                     self.bot.log("SYS", "Falling back to manual solve — starting DM/webhook alert loop.")
                     alert_msg = f"Solve link in DM: {captcha_url}"
-                    # Surface the exact solver failure to admin-role accounts only — logs
-                    # aren't always visible, but this detail isn't relevant/shown to
-                    # non-admin accounts (they can't view/edit captcha_solver anyway).
-                    if fail_reason and getattr(self.bot, 'account_role', 'user') == 'admin':
+                    if fail_reason:
                         alert_msg += f"\n\n⚠️ Auto-solve error ({self.bot.web_solver.provider}): {fail_reason}"
+                    diag = self.bot.web_solver.get_last_diagnostic_summary()
+                    if diag:
+                        alert_msg += f"\n\n🧾 Trace: {diag}"
                     self._start_continuous_captcha_alert("DM CAPTCHA", alert_msg)
                     if sys.platform == "win32" and sec_cfg.get("open_captcha_url_on_pc", False):
                         self.bot.log("SYS", "Opening Captcha in Browser with Auto-Login...")
@@ -478,8 +478,11 @@ class Security(commands.Cog):
                 self.bot.log("SYS", "Falling back to manual solve — starting DM/webhook alert loop.")
                 solve_link = captcha_url or "https://owobot.com/captcha"
                 alert_msg = f"Solve: {solve_link}"
-                if fail_reason and getattr(self.bot, 'account_role', 'user') == 'admin':
+                if fail_reason:
                     alert_msg += f"\n\n⚠️ Auto-solve error ({self.bot.web_solver.provider}): {fail_reason}"
+                diag = self.bot.web_solver.get_last_diagnostic_summary()
+                if diag:
+                    alert_msg += f"\n\n🧾 Trace: {diag}"
                 self._start_continuous_captcha_alert("CAPTCHA DETECTED", alert_msg)
                 if sys.platform == "win32" and sec_cfg.get("open_captcha_url_on_pc", False):
                     self.bot.log("SYS", "Opening Captcha in Browser with Auto-Login...")
