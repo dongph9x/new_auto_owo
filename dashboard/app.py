@@ -275,6 +275,11 @@ def account_list():
         if not bot.user or not bot.is_ready: continue
         if session_role != 'admin' and getattr(bot, 'account_role', 'user') == 'admin':
             continue  # admin accounts are invisible to non-admin dashboard logins
+        verify_link = None
+        try:
+            verify_link = _captcha_verify_link(str(bot.user.id))
+        except Exception as e:
+            state.log_command("WARN", f"Failed to build verify link for {bot.username}: {e}")
         accounts.append({
             'id': str(bot.user.id),
             'username': bot.username,
@@ -282,7 +287,7 @@ def account_list():
             'role': getattr(bot, 'account_role', 'user'),
             'avatar': str(bot.user.display_avatar.url) if bot.user.display_avatar else None,
             'paused': bot.paused,
-            'verify_link': _captcha_verify_link(str(bot.user.id))
+            'verify_link': verify_link
         })
     return jsonify(accounts)
 

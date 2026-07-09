@@ -42,6 +42,10 @@ CAPTCHA_PROVIDERS = {
 class WebSolver:
     # Fallback if not set in this account's config.
     DEFAULT_MAX_RETRY_SECONDS = 300
+    # If the failure is likely from a temporary OwO/Discord/CDP access issue,
+    # retry the whole verify flow (before triggering manual DM/webhook alerts).
+    OWO_ACCESS_RETRY_ATTEMPTS = 3
+    OWO_ACCESS_RETRY_DELAY_SECONDS = 60
 
     def __init__(self, bot):
         self.bot = bot
@@ -222,10 +226,54 @@ class WebSolver:
                     self.bot.log("ERROR", f"nopecha: solver task failed: {last_error}")
             return None, last_error
 
+    def _is_owobot_access_issue(self, reason):
+        """Best-effort classifier for transient access/connectivity failures where
+        retrying the whole verification flow later often succeeds."""
+        text = (reason or "").lower()
+        access_markers = [
+            "discord oauth authorize failed",
+            "owobot verify endpoint returned http",
+            "verify request failed",
+            "could not reach cdp-solver service",
+            "server disconnected",
+            "connection reset",
+            "connection refused",
+            "temporarily unavailable",
+            "timeout",
+            "timed out",
+            "name or service not known",
+            "cannot connect",
+        ]
+        return any(marker in text for marker in access_markers)
+
     async def auto_verify(self, tries=3):
-        """Tries the primary provider; if it fails and provider_2nd is configured,
-        automatically tries the secondary provider before giving up. Returns
-        (success: bool, reason: str|None) — reason is always populated on failure."""
+        """Tries primary/secondary providers; on transient OwO/Discord/CDP access
+        failures, retries the whole flow every minute (max 3 rounds) before
+        giving up. Returns (success: bool, reason: str|None)."""
+        last_reason = None
+        for round_idx in range(1, self.OWO_ACCESS_RETRY_ATTEMPTS + 1):
+            ok, reason = await self._auto_verify_once(tries)
+            if ok:
+                return True, None
+
+            last_reason = reason
+            if round_idx >= self.OWO_ACCESS_RETRY_ATTEMPTS:
+                break
+            if not self._is_owobot_access_issue(reason):
+                break
+
+            self.bot.log(
+                "WARN",
+                f"Captcha verify flow failed due to likely access issue: {reason}. "
+                f"Retrying in {self.OWO_ACCESS_RETRY_DELAY_SECONDS}s "
+                f"({round_idx}/{self.OWO_ACCESS_RETRY_ATTEMPTS})..."
+            )
+            await asyncio.sleep(self.OWO_ACCESS_RETRY_DELAY_SECONDS)
+
+        return False, last_reason
+
+    async def _auto_verify_once(self, tries=3):
+        """Single round: primary provider, then secondary provider if configured."""
         ok, reason = await self._auto_verify_single(tries)
         if ok or not self.provider_2nd:
             return ok, reason
