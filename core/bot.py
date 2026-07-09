@@ -18,8 +18,6 @@ import random
 import asyncio
 import itertools
 import re
-import sys
-import requests
 from modules.neura_human import NeuraHuman
 from modules.neura_logs import neura_logger
 from modules.identity import IdentityManager
@@ -31,7 +29,6 @@ import aiohttp
 import unicodedata
 import logging
 from rich.console import Console
-from rich.align import Align
 
 _log = logging.getLogger(__name__)
 
@@ -462,35 +459,8 @@ class NeuraBot(commands.Bot):
 
 
     def check_version(self):
-        CURRENT_VERSION = "2.3.2" 
-        VERSION_URL = "https://raw.githubusercontent.com/routo-loop/neura_status_api/main/version.json"
-        
-        self.log("SYS", "Checking for updates...")
-        try:
-            r = requests.get(VERSION_URL, timeout=5)
-            if r.status_code == 200:
-                data = r.json()
-                latest_version = data.get("version", "2.3.0")
-                changelog = data.get("changelog", "No changes listed.")
-                
-                if latest_version != CURRENT_VERSION:
-                    os.system('cls' if os.name == 'nt' else 'clear')
-                    line = "┈┈┈┈┈┈┈┈┈┈┈┈┈┈┈┈┈┈┈┈┈┈┈┈┈┈┈┈┈┈┈┈┈┈┈┈┈┈┈┈┈┈┈┈┈┈┈┈┈┈┈┈┈┈┈┈┈"
-                    self.console.print("\n")
-                    self.console.print(Align.center(f"[bold red]{line}[/bold red]"))
-                    self.console.print(Align.center(f"[bold white]   NEW VERSION AVAILABLE: [yellow]{latest_version}[/yellow] (Current: {CURRENT_VERSION})[/bold white]"))
-                    self.console.print(Align.center(f"[bold red]{line}[/bold red]"))
-                    self.console.print(Align.center(f"\n[bold cyan]CHANGELOG:[/bold cyan]\n[white]{changelog}[/white]\n"))
-                    self.console.print(Align.center(f"[bold red]{line}[/bold red]"))
-                    self.console.print(Align.center("[bold yellow]PLEASE UPDATE TO CONTINUE:[/bold yellow]"))
-                    self.console.print(Align.center("[bold cyan]https://github.com/routo-loop/neura-self[/bold cyan]"))
-                    self.console.print(Align.center(f"[bold red]{line}[/bold red]"))
-                    self.console.print("\n")
-                    sys.exit(0)
-                else:
-                    self.log("SYS", "You are on the latest version.")
-        except Exception as e:
-            self.log("WARN", f"Version check failed: {e}")
+        # Disabled for personal/private deployments.
+        return
     
     async def run_bot(self):
         self.check_version()
