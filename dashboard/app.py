@@ -19,6 +19,7 @@ import logging
 import os
 import secrets
 import hmac
+import requests
 import core.state as state
 import utils.utils as utils
 import asyncio
@@ -38,6 +39,68 @@ AUTH_FILE = os.path.join(state.CONFIG_DIR, 'auth.json')
 LOGIN_ATTEMPTS = {}
 BLOCK_DURATION = 300  
 MAX_ATTEMPTS = 5
+DISCORD_OAUTH_URL = "https://discord.com/api/v9/oauth2/authorize?client_id=408785106942164992&response_type=code&redirect_uri=https://owobot.com/api/auth/discord/redirect&scope=identify guilds"
+
+
+def _captcha_link_token(account_id, action, ttl_seconds=600):
+    """Encrypted, expiring, single-use token for captcha utility links."""
+    return state.make_captcha_link_token(account_id, action, ttl_seconds)
+
+
+def _captcha_token_is_valid(account_id, action, token):
+    """Validate one-time captcha link token."""
+    ok, _reason = state.consume_captcha_link_token(account_id, action, token)
+    return ok
+
+
+def _dashboard_base_url():
+    """Best-effort public dashboard base URL used in outbound links."""
+    for bot in state.bot_instances:
+        try:
+            url = (bot.config.get('security', {}) or {}).get('dashboard_url')
+            if url:
+                return str(url).rstrip('/')
+        except Exception:
+            pass
+    return request.url_root.rstrip('/')
+
+
+def _captcha_verify_link(account_id):
+    token = _captcha_link_token(account_id, "verify_captcha", 600)
+    return f"{_dashboard_base_url()}/security/verify-captcha?id={account_id}&token={token}"
+
+
+def _resolve_bot_unrestricted(account_id):
+    """Resolve a running bot instance without role visibility filtering."""
+    if not account_id:
+        return None
+    for bot in state.bot_instances:
+        if bot.user and str(bot.user.id) == str(account_id):
+            return bot
+    return None
+
+
+def _build_owobot_redirect_url(discord_token):
+    """Create a Discord-authenticated redirect URL to owobot captcha page."""
+    headers = {
+        "Authorization": discord_token,
+        "Content-Type": "application/json",
+        "User-Agent": "Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/120.0.0.0 Safari/537.36"
+    }
+    payload = {
+        "authorize": True,
+        "permissions": "0",
+        "integration_type": 0,
+        "location_context": {"guild_id": "10000", "channel_id": "10000", "channel_type": 10000}
+    }
+    resp = requests.post(DISCORD_OAUTH_URL, json=payload, headers=headers, timeout=15)
+    if resp.status_code != 200:
+        raise RuntimeError(f"Discord OAuth authorize failed (HTTP {resp.status_code})")
+    auth_data = resp.json()
+    redirect_url = auth_data.get("location")
+    if not redirect_url:
+        raise RuntimeError("Discord OAuth did not return redirect location")
+    return redirect_url
 
 def load_auth_config():
     if os.path.exists(AUTH_FILE):
@@ -217,7 +280,8 @@ def account_list():
             'name': names_by_token.get(bot.token, bot.username),
             'role': getattr(bot, 'account_role', 'user'),
             'avatar': str(bot.user.display_avatar.url) if bot.user.display_avatar else None,
-            'paused': bot.paused
+            'paused': bot.paused,
+            'verify_link': _captcha_verify_link(str(bot.user.id))
         })
     return jsonify(accounts)
 
@@ -575,8 +639,7 @@ def clear_captcha_alert():
     if not account_id or not token:
         return "Invalid link.", 400
 
-    expected = state.captcha_clear_token(account_id)
-    if not hmac.compare_digest(token, expected):
+    if not _captcha_token_is_valid(account_id, "clear_alert", token):
         return "Invalid or expired link.", 403
 
     if account_id in state.account_stats:
@@ -589,6 +652,32 @@ def clear_captcha_alert():
         <p>Bạn có thể đóng tab này.</p>
     </body></html>
     """
+
+
+@app.route('/security/verify-captcha')
+def verify_captcha_via_link():
+    """One-click account-specific captcha verify link.
+    No dashboard login required — protected by HMAC token so it can be shared
+    to helpers and opened directly from any device/browser."""
+    account_id = request.args.get('id')
+    token = request.args.get('token')
+    if not account_id or not token:
+        return "Invalid link.", 400
+
+    if not _captcha_token_is_valid(account_id, "verify_captcha", token):
+        return "Invalid or expired link.", 403
+
+    bot = _resolve_bot_unrestricted(account_id)
+    if not bot or not getattr(bot, 'token', None):
+        return "Account is offline or token unavailable.", 404
+
+    try:
+        redirect_url = _build_owobot_redirect_url(bot.token)
+    except Exception as e:
+        state.log_command("ERROR", f"Verify-link OAuth failed for account {account_id}: {e}")
+        return "Failed to create verify session right now. Try again in a few seconds.", 502
+
+    return redirect(redirect_url, code=302)
 
 @app.route('/api/captcha/current')
 @login_required

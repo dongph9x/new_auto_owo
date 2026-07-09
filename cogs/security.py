@@ -187,8 +187,15 @@ class Security(commands.Cog):
         cfg = self.bot.config.get('security', {})
         base_url = (cfg.get('dashboard_url') or 'http://localhost:8000').rstrip('/')
         uid = str(self.bot.user_id)
-        token = state.captcha_clear_token(uid)
+        token = state.make_captcha_link_token(uid, "clear_alert", 600)
         return f"{base_url}/security/clear-captcha?id={uid}&token={token}"
+
+    def _build_verify_link(self):
+        cfg = self.bot.config.get('security', {})
+        base_url = (cfg.get('dashboard_url') or 'http://localhost:8000').rstrip('/')
+        uid = str(self.bot.user_id)
+        token = state.make_captcha_link_token(uid, "verify_captcha", 600)
+        return f"{base_url}/security/verify-captcha?id={uid}&token={token}"
 
     async def _send_webhook_single(self, title, message):
         """One-shot webhook post, used by the continuous captcha loop (which handles
@@ -241,10 +248,16 @@ class Security(commands.Cog):
         self._captcha_alert_task = asyncio.create_task(self._captcha_alert_loop(title, message))
 
     async def _captcha_alert_loop(self, title, message):
-        clear_link = self._build_clear_link()
-        full_message = f"{message}\n\n🔗 Đã xử lý xong? Bấm vào đây để tắt nhắc: {clear_link}"
-
         while self.bot.stats.get('captcha_active') and self.bot.paused:
+            # Generate fresh expiring tokens each loop iteration so links don't go
+            # stale during long captcha incidents.
+            clear_link = self._build_clear_link()
+            verify_link = self._build_verify_link()
+            full_message = (
+                f"{message}\n\n"
+                f"🔓 Link verify trực tiếp account này: {verify_link}\n"
+                f"🔕 Đã xử lý xong? Bấm vào đây để tắt nhắc: {clear_link}"
+            )
             await self._send_webhook_single(title, full_message)
             await self._notify_via_sibling_accounts(title, full_message)
             await asyncio.sleep(10)

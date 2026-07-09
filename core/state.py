@@ -14,9 +14,12 @@ import json
 import os
 import hmac
 import hashlib
+import base64
+import secrets
 import datetime
 from collections import deque
 import utils.history_tracker as ht
+from cryptography.fernet import Fernet, InvalidToken
 
 BASE_DIR = os.path.dirname(os.path.dirname(os.path.abspath(__file__)))
 CONFIG_DIR = os.path.join(BASE_DIR, 'config')
@@ -87,6 +90,77 @@ def get_dashboard_secret():
 def captcha_clear_token(account_id):
     secret = get_dashboard_secret().encode()
     return hmac.new(secret, str(account_id).encode(), hashlib.sha256).hexdigest()[:20]
+
+
+# In-memory replay protection for one-time captcha action links. A token's nonce
+# is marked used after first successful validation until its own expiry time.
+_CAPTCHA_LINK_USED_NONCES = {}
+
+
+def _captcha_links_fernet():
+    """Derive a stable Fernet key from dashboard secret_key."""
+    secret = get_dashboard_secret().encode()
+    key_bytes = hashlib.sha256(secret + b":captcha-links:v1").digest()
+    return Fernet(base64.urlsafe_b64encode(key_bytes))
+
+
+def _cleanup_used_captcha_nonces(now_ts=None):
+    now_ts = int(now_ts or time.time())
+    stale = [nonce for nonce, exp in _CAPTCHA_LINK_USED_NONCES.items() if exp <= now_ts]
+    for nonce in stale:
+        _CAPTCHA_LINK_USED_NONCES.pop(nonce, None)
+
+
+def make_captcha_link_token(account_id, action, ttl_seconds=600):
+    """Create encrypted token for one-click captcha links.
+    Payload includes account_id, action, expiry and nonce (single-use)."""
+    now_ts = int(time.time())
+    ttl = max(30, int(ttl_seconds or 600))
+    payload = {
+        "v": 1,
+        "aid": str(account_id),
+        "act": str(action),
+        "exp": now_ts + ttl,
+        "nonce": secrets.token_urlsafe(18),
+    }
+    raw = json.dumps(payload, separators=(",", ":"), ensure_ascii=True).encode()
+    return _captcha_links_fernet().encrypt(raw).decode()
+
+
+def consume_captcha_link_token(account_id, action, token):
+    """Validate and consume encrypted captcha-link token once.
+    Returns (ok: bool, reason: str|None)."""
+    if not token:
+        return False, "missing token"
+
+    now_ts = int(time.time())
+    _cleanup_used_captcha_nonces(now_ts)
+
+    try:
+        raw = _captcha_links_fernet().decrypt(token.encode())
+        payload = json.loads(raw.decode())
+    except InvalidToken:
+        return False, "invalid token"
+    except Exception:
+        return False, "bad token payload"
+
+    if str(payload.get("aid")) != str(account_id):
+        return False, "account mismatch"
+    if str(payload.get("act")) != str(action):
+        return False, "action mismatch"
+
+    exp = int(payload.get("exp", 0) or 0)
+    if exp < now_ts:
+        return False, "expired token"
+
+    nonce = str(payload.get("nonce", "")).strip()
+    if not nonce:
+        return False, "missing nonce"
+    if nonce in _CAPTCHA_LINK_USED_NONCES:
+        return False, "token already used"
+
+    _CAPTCHA_LINK_USED_NONCES[nonce] = exp
+    return True, None
 
 def save_account_stats():
     try:

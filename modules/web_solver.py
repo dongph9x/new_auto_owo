@@ -318,20 +318,37 @@ class WebSolver:
         no paid API) to solve the captcha, then submit the resulting token to
         owobot exactly like the API-based providers do."""
         self.bot.log("SYS", f"cdp_local: requesting solve from {self.cdp_solver_url} ...")
-        try:
-            async with aiohttp.ClientSession() as session:
-                async with session.post(
-                    f"{self.cdp_solver_url}/solve",
-                    json={"discord_token": self.bot.token},
-                    timeout=aiohttp.ClientTimeout(total=self.max_retry_seconds + 30),
-                ) as resp:
-                    if resp.status != 200:
-                        reason = f"cdp-solver service returned HTTP {resp.status}"
-                        self.bot.log("ERROR", f"cdp_local: {reason}")
-                        return False, reason
-                    data = await resp.json()
-        except Exception as e:
-            reason = f"could not reach cdp-solver service: {e}"
+        data = None
+        last_err = None
+        request_timeout = aiohttp.ClientTimeout(total=self.max_retry_seconds + 30)
+        # A short retry helps with transient connection resets ("Server disconnected")
+        # without significantly delaying fallback behaviour.
+        for attempt in range(2):
+            try:
+                async with aiohttp.ClientSession() as session:
+                    async with session.post(
+                        f"{self.cdp_solver_url}/solve",
+                        json={"discord_token": self.bot.token},
+                        timeout=request_timeout,
+                    ) as resp:
+                        if resp.status != 200:
+                            reason = f"cdp-solver service returned HTTP {resp.status}"
+                            self.bot.log("ERROR", f"cdp_local: {reason}")
+                            return False, reason
+                        data = await resp.json()
+                        break
+            except Exception as e:
+                last_err = e
+                if attempt == 0:
+                    self.bot.log("WARN", f"cdp_local: transient solve request error (attempt 1/2): {e}")
+                    await asyncio.sleep(1.5)
+                else:
+                    reason = f"could not reach cdp-solver service: {e}"
+                    self.bot.log("ERROR", f"cdp_local: {reason}")
+                    return False, reason
+
+        if data is None:
+            reason = f"could not reach cdp-solver service: {last_err or 'unknown error'}"
             self.bot.log("ERROR", f"cdp_local: {reason}")
             return False, reason
 

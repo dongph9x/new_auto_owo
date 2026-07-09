@@ -113,7 +113,9 @@ def get_owobot_session_cookies(discord_token: str):
 async def _solve_async(captcha_url: str, cdp_cookies: list):
     from seleniumbase import cdp_driver
 
-    driver = await cdp_driver.start_async(headless=False, xvfb=True)
+    # Xvfb is already managed by container entrypoint; avoid starting a second
+    # nested Xvfb here (can cause display lock/race issues).
+    driver = await cdp_driver.start_async(headless=False, xvfb=False)
     try:
         # Must land on the target origin once before cookies for that domain apply.
         await driver.get("https://owobot.com")
@@ -161,17 +163,24 @@ def solve():
     if not discord_token:
         return jsonify({"success": False, "error": "discord_token is required"}), 400
 
+    masked_token = (
+        f"{discord_token[:6]}...{discord_token[-4:]}"
+        if isinstance(discord_token, str) and len(discord_token) >= 12
+        else "short/invalid"
+    )
+    log.info(f"/solve request received (captcha_url={captcha_url}, token={masked_token})")
+
     start = time.time()
     try:
         cdp_cookies = get_owobot_session_cookies(discord_token)
     except Exception as e:
-        log.error(f"Cookie handshake failed: {e}")
+        log.exception(f"Cookie handshake failed: {e}")
         return jsonify({"success": False, "error": f"auth failed: {e}"}), 200
 
     try:
         token, solved = asyncio.run(_solve_async(captcha_url, cdp_cookies))
     except Exception as e:
-        log.error(f"CDP solve failed: {e}")
+        log.exception(f"CDP solve failed: {e}")
         return jsonify({"success": False, "error": f"solve failed: {e}"}), 200
 
     elapsed = round(time.time() - start, 1)
