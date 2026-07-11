@@ -5,7 +5,7 @@ __pycache__/
 *.py[cod]
 *$py.class
 
-# SeleniumBase local test artifacts (experiments/test_cdp_hcaptcha.py)
+# Browser automation local test artifacts
 downloaded_files/
 geckodriver.log
 latest_logs/

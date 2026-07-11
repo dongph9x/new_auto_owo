@@ -42,7 +42,7 @@ CAPTCHA_PROVIDERS = {
 class WebSolver:
     # Fallback if not set in this account's config.
     DEFAULT_MAX_RETRY_SECONDS = 300
-    # If the failure is likely from a temporary OwO/Discord/CDP access issue,
+    # If the failure is likely from a temporary OwO/Discord/provider access issue,
     # retry the whole verify flow (before triggering manual DM/webhook alerts).
     OWO_ACCESS_RETRY_ATTEMPTS = 3
     OWO_ACCESS_RETRY_DELAY_SECONDS = 60
@@ -64,10 +64,6 @@ class WebSolver:
         self.browser_cfg = cfg.get('browser_config', {})
         self.site_key = "a6a1d5ce-612d-472d-8e37-7601408fbc09"
         self.auth_url = "https://discord.com/api/v9/oauth2/authorize?client_id=408785106942164992&response_type=code&redirect_uri=https://owobot.com/api/auth/discord/redirect&scope=identify guilds"
-        # Free fallback: a real Chrome (CDP mode) solving the captcha locally instead
-        # of a paid API. Internal-only service, see cdp_solver/. Unproven in
-        # production yet — set provider to "cdp_local" to try it.
-        self.cdp_solver_url = cfg.get('cdp_solver_url', 'http://cdp-solver:8100').rstrip('/')
         # Optional secondary provider, tried only if the primary one fails (e.g.
         # nopecha is overloaded/timing out) — before giving up and falling back to
         # the DM/webhook manual-solve alert. Leave provider_2nd unset/empty to
@@ -330,7 +326,7 @@ class WebSolver:
     async def auto_verify(self, tries=3):
         """Primary-first verification policy:
         - Retry primary NopeCHA/provider-connect failures every 60s up to 3 rounds.
-          If still failing, fallback to secondary (CDP) when configured.
+          If still failing, fallback to secondary provider when configured.
         - Retry upstream OwO/Discord verify-path failures up to 3 rounds, then stop
           without secondary (secondary would hit the same upstream).
         - For non-transient primary solve failures, switch to secondary immediately."""
@@ -380,7 +376,8 @@ class WebSolver:
                 )
             await asyncio.sleep(retry_delay)
 
-        # If upstream verify path is down after retries, stop here (don't waste CDP).
+        # If upstream verify path is down after retries, stop here (don't waste
+        # secondary retries — every provider still hits the same upstream path).
         if policy == "retry_primary_no_secondary":
             reason = (
                 f"{self.provider}: upstream verify path still failing after "
@@ -424,10 +421,6 @@ class WebSolver:
     async def _auto_verify_single(self, tries=3):
         """One provider attempt, using whatever self.provider/self.api_key currently
         are — see auto_verify() for the primary/secondary orchestration around this."""
-        if self.provider == "cdp_local":
-            self._diag("provider cdp_local path")
-            return await self._auto_verify_cdp_local()
-
         if not self.api_key:
             reason = "API key missing in settings"
             self.bot.log("ERROR", f"{self.provider}: {reason}.")
@@ -497,89 +490,6 @@ class WebSolver:
                 self._diag(f"{self.provider} auto_verify exception={reason}")
                 self._set_failure_point("AUTO_VERIFY_EXCEPTION", reason)
                 return False, reason
-
-    async def _auto_verify_cdp_local(self):
-        """Free fallback path: ask the cdp-solver service (real Chrome, CDP mode,
-        no paid API) to solve the captcha, then submit the resulting token to
-        owobot exactly like the API-based providers do."""
-        self.bot.log("SYS", f"cdp_local: requesting solve from {self.cdp_solver_url} ...")
-        self._diag(f"cdp_local call solve url={self.cdp_solver_url}/solve")
-        data = None
-        last_err = None
-        request_timeout = aiohttp.ClientTimeout(total=self.max_retry_seconds + 30)
-        # A short retry helps with transient connection resets ("Server disconnected")
-        # without significantly delaying fallback behaviour.
-        for attempt in range(2):
-            try:
-                async with aiohttp.ClientSession() as session:
-                    async with session.post(
-                        f"{self.cdp_solver_url}/solve",
-                        json={"discord_token": self.bot.token},
-                        timeout=request_timeout,
-                    ) as resp:
-                        if resp.status != 200:
-                            reason = f"cdp-solver service returned HTTP {resp.status}"
-                            self.bot.log("ERROR", f"cdp_local: {reason}")
-                            self._diag(f"cdp_local solve http={resp.status}")
-                            self._set_failure_point("CDP_SOLVE_HTTP", reason)
-                            return False, reason
-                        data = await resp.json()
-                        self._diag(f"cdp_local solve response success={bool(data.get('success'))}")
-                        break
-            except Exception as e:
-                last_err = e
-                if attempt == 0:
-                    self.bot.log("WARN", f"cdp_local: transient solve request error (attempt 1/2): {e}")
-                    self._diag(f"cdp_local transient err={e}")
-                    await asyncio.sleep(1.5)
-                else:
-                    reason = f"could not reach cdp-solver service: {e}"
-                    self.bot.log("ERROR", f"cdp_local: {reason}")
-                    self._diag(f"cdp_local reach failed={e}")
-                    self._set_failure_point("CDP_CONNECT", reason)
-                    return False, reason
-
-        if data is None:
-            reason = f"could not reach cdp-solver service: {last_err or 'unknown error'}"
-            self.bot.log("ERROR", f"cdp_local: {reason}")
-            self._set_failure_point("CDP_CONNECT", reason)
-            return False, reason
-
-        if not data.get("success") or not data.get("token"):
-            reason = data.get("error") or "cdp-solver did not return a token"
-            self.bot.log("ERROR", f"cdp_local: {reason}")
-            self._diag(f"cdp_local token missing err={reason}")
-            self._set_failure_point("CDP_TOKEN_MISSING", reason)
-            return False, reason
-
-        solution = data["token"]
-        headers = {
-            "Authorization": self.bot.token,
-            "Content-Type": "application/json",
-            "User-Agent": "Mozilla/5.0 (Windows NT 10.0; Win64; x44) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/120.0.0.0 Safari/537.36",
-        }
-        verify_url = "https://owobot.com/api/captcha/verify"
-        try:
-            async with aiohttp.ClientSession(headers=headers) as session:
-                async with session.post(
-                    verify_url,
-                    json={"token": solution},
-                    headers={"Referer": "https://owobot.com/captcha", "Origin": "https://owobot.com"},
-                ) as v_resp:
-                    if v_resp.status == 200:
-                        self._diag("cdp_local verify ok")
-                        return True, None
-                    reason = f"owobot verify endpoint returned HTTP {v_resp.status}"
-                    self.bot.log("ERROR", f"cdp_local: {reason}")
-                    self._diag(f"cdp_local verify http={v_resp.status}")
-                    self._set_failure_point("OWO_VERIFY_HTTP", reason)
-                    return False, reason
-        except Exception as e:
-            reason = f"verify request failed: {e}"
-            self.bot.log("ERROR", f"cdp_local: {reason}")
-            self._diag(f"cdp_local verify exception={e}")
-            self._set_failure_point("OWO_VERIFY_EXCEPTION", reason)
-            return False, reason
 
     async def fetch_battle_log(self, uuid):
         """Pull the structured battle-log replay JSON for `uuid` — the same data the
