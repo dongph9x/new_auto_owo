@@ -48,6 +48,7 @@ class WebSolver:
     OWO_ACCESS_RETRY_DELAY_SECONDS = 60
     PRIMARY_PROVIDER_RETRY_ATTEMPTS = 3
     PRIMARY_PROVIDER_RETRY_DELAY_SECONDS = 60
+    VERIFY_FLOW_MAX_SECONDS = 480  # keep headroom under OwO's 10-minute window
 
     def __init__(self, bot):
         self.bot = bot
@@ -323,28 +324,35 @@ class WebSolver:
 
         return "switch_secondary_now"
 
-    async def auto_verify(self, tries=3):
+    async def auto_verify(self, tries=3, max_total_seconds=None):
         """Primary-first verification policy:
         - Retry primary NopeCHA/provider-connect failures every 60s up to 3 rounds.
           If still failing, fallback to secondary provider when configured.
         - Retry upstream OwO/Discord verify-path failures up to 3 rounds, then stop
           without secondary (secondary would hit the same upstream).
         - For non-transient primary solve failures, switch to secondary immediately."""
+        budget_seconds = int(max_total_seconds or self.VERIFY_FLOW_MAX_SECONDS)
+        hard_deadline = time.time() + max(30, budget_seconds)
         self._diagnostic_steps = []
         self._diag_started_at = time.time()
         self._diag_step_no = 0
         self._diag_failure_point = ""
         self._diag(
             f"auto_verify start provider={self.provider} key={self._mask_secret(self.api_key)} "
-            f"secondary={self.provider_2nd or '-'} key2={self._mask_secret(self.api_key_2nd)}"
+            f"secondary={self.provider_2nd or '-'} key2={self._mask_secret(self.api_key_2nd)} "
+            f"budget={max(30, budget_seconds)}s"
         )
         last_reason = "unknown error"
         policy = "switch_secondary_now"
 
         # Stage 1: primary provider attempts (with conditional retries).
         for round_idx in range(1, self.PRIMARY_PROVIDER_RETRY_ATTEMPTS + 1):
+            if time.time() >= hard_deadline:
+                last_reason = f"auto-verify time budget exceeded ({max(30, budget_seconds)}s)"
+                self._set_failure_point("VERIFY_BUDGET_TIMEOUT", last_reason)
+                break
             self._diag(f"primary round={round_idx}/{self.PRIMARY_PROVIDER_RETRY_ATTEMPTS}")
-            ok, reason = await self._auto_verify_single(tries)
+            ok, reason = await self._auto_verify_single(tries, hard_deadline=hard_deadline)
             if ok:
                 self._diag("auto_verify success")
                 return True, None
@@ -374,7 +382,12 @@ class WebSolver:
                     f"Retrying primary in {retry_delay}s "
                     f"({round_idx}/{self.PRIMARY_PROVIDER_RETRY_ATTEMPTS})..."
                 )
-            await asyncio.sleep(retry_delay)
+            remaining = max(0, hard_deadline - time.time())
+            if remaining <= 0:
+                last_reason = f"auto-verify time budget exceeded ({max(30, budget_seconds)}s)"
+                self._set_failure_point("VERIFY_BUDGET_TIMEOUT", last_reason)
+                break
+            await asyncio.sleep(min(retry_delay, remaining))
 
         # If upstream verify path is down after retries, stop here (don't waste
         # secondary retries — every provider still hits the same upstream path).
@@ -405,7 +418,7 @@ class WebSolver:
             self.provider = self.provider_2nd
             self.api_key = self.api_key_2nd
             self.max_retry_seconds = self.max_retry_seconds_2nd
-            ok2, reason2 = await self._auto_verify_single(tries)
+            ok2, reason2 = await self._auto_verify_single(tries, hard_deadline=hard_deadline)
         finally:
             self.provider, self.api_key, self.max_retry_seconds = orig
 
@@ -418,9 +431,14 @@ class WebSolver:
         self._set_failure_point("SECONDARY_FAILED", final_reason)
         return False, final_reason
 
-    async def _auto_verify_single(self, tries=3):
+    async def _auto_verify_single(self, tries=3, hard_deadline=None):
         """One provider attempt, using whatever self.provider/self.api_key currently
         are — see auto_verify() for the primary/secondary orchestration around this."""
+        if hard_deadline is not None and time.time() >= hard_deadline:
+            reason = "auto-verify time budget exceeded before provider attempt"
+            self._set_failure_point("VERIFY_BUDGET_TIMEOUT", reason)
+            return False, reason
+
         if not self.api_key:
             reason = "API key missing in settings"
             self.bot.log("ERROR", f"{self.provider}: {reason}.")
@@ -466,7 +484,7 @@ class WebSolver:
                 if redirect_url:
                     async with session.get(redirect_url) as r: pass
 
-                solution, solve_reason = await self.solve_hcaptcha(tries)
+                solution, solve_reason = await self.solve_hcaptcha(tries, deadline=hard_deadline)
                 if not solution:
                     reason = f"failed to solve after {tries} attempt(s): {solve_reason}"
                     self._diag(f"{self.provider} solve failed: {solve_reason}")

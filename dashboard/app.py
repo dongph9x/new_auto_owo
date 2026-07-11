@@ -707,6 +707,11 @@ def verify_captcha_via_link():
     bot = _resolve_bot_unrestricted(account_id)
     if not bot or not getattr(bot, 'token', None):
         return "Account is offline or token unavailable.", 404
+    if account_id not in state.account_stats:
+        state.account_stats[account_id] = {}
+    state.account_stats[account_id]['captcha_status'] = 'resolved'
+    state.account_stats[account_id]['captcha_active'] = False
+    state.log_command("SEC", f"Captcha marked resolved via verify link for account {account_id}", "success")
 
     try:
         redirect_url = _build_owobot_redirect_url(bot.token)

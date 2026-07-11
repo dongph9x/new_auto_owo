@@ -26,8 +26,8 @@ from plyer import notification
 import core.state as state
 
 class Security(commands.Cog):
-    CAPTCHA_TAG_MAX_ATTEMPTS = 3
-    CAPTCHA_TAG_INTERVAL_SECONDS = 30
+    CAPTCHA_TAG_INTERVAL_SECONDS = 120
+    CAPTCHA_RESOLVE_ON_REMINDER_COUNT = 5
 
     def __init__(self, bot):
         self.bot = bot
@@ -240,12 +240,15 @@ class Security(commands.Cog):
             pass
 
     def _start_continuous_captcha_alert(self, title, message):
-        """Keep nagging (webhook + cross-account DM) every 10s until the account is
-        un-paused, either by the user clicking the clear-link in the DM, or by
-        resuming the bot manually (dashboard / auto-verify)."""
+        """Keep nagging (webhook + sibling-account DM) every 2 minutes while
+        captcha is still pending. The loop stops only when captcha is finalized
+        as resolved or failed."""
         st = self.bot.stats
         already_active = st.get('captcha_active', False)
         st['captcha_active'] = True
+        st.setdefault('captcha_status', 'pending')
+        if not already_active:
+            st['captcha_alert_count'] = 0
 
         if already_active and self._captcha_alert_task and not self._captcha_alert_task.done():
             return  # already nagging, no need for a second overlapping loop
@@ -253,13 +256,13 @@ class Security(commands.Cog):
         self._captcha_alert_task = asyncio.create_task(self._captcha_alert_loop(title, message))
 
     async def _captcha_alert_loop(self, title, message):
-        reminder_count = 0
         while (
             self.bot.stats.get('captcha_active')
             and self.bot.paused
-            and reminder_count < self.CAPTCHA_TAG_MAX_ATTEMPTS
+            and self.bot.stats.get('captcha_status', 'pending') == 'pending'
         ):
-            reminder_count += 1
+            next_count = int(self.bot.stats.get('captcha_alert_count', 0)) + 1
+            self.bot.stats['captcha_alert_count'] = next_count
             # Generate fresh expiring tokens each loop iteration so links don't go
             # stale during long captcha incidents.
             clear_link = self._build_clear_link()
@@ -269,25 +272,27 @@ class Security(commands.Cog):
                 f"🔓 Link verify trực tiếp account này: {verify_link}\n"
                 f"🔕 Đã xử lý xong? Bấm vào đây để tắt nhắc: {clear_link}"
             )
-            # Send at most 3 mention alerts, spaced by 30 seconds.
             await self._send_webhook_single(title, full_message, include_mention=True)
-
-            # Cross-account DM should only fire once.
-            if reminder_count == 1:
-                await self._notify_via_sibling_accounts(title, full_message)
-
-            if reminder_count < self.CAPTCHA_TAG_MAX_ATTEMPTS:
-                await asyncio.sleep(self.CAPTCHA_TAG_INTERVAL_SECONDS)
-
-        if self.bot.stats.get('captcha_active') and self.bot.paused:
-            self.bot.log(
-                "SECURITY",
-                f"Captcha alert limit reached ({self.CAPTCHA_TAG_MAX_ATTEMPTS} tags). "
-                "Waiting for manual solve without further spam."
-            )
-            return
+            await self._notify_via_sibling_accounts(title, full_message)
+            if next_count >= self.CAPTCHA_RESOLVE_ON_REMINDER_COUNT:
+                self.bot.stats['captcha_status'] = 'resolved'
+                self.bot.stats['captcha_active'] = False
+                self.bot.log(
+                    "SECURITY",
+                    f"Captcha alert reached reminder {self.CAPTCHA_RESOLVE_ON_REMINDER_COUNT}; marking resolved."
+                )
+                break
+            await asyncio.sleep(self.CAPTCHA_TAG_INTERVAL_SECONDS)
 
         self.bot.stats['captcha_active'] = False
+
+    async def _notify_captcha_failed(self, title, message, fail_reason):
+        error_message = message
+        if fail_reason:
+            error_message += f"\n\n❌ Captcha failed: {fail_reason}"
+        error_message += "\n\n⚠️ Captcha đã fail, cần kiểm tra và xử lý thủ công."
+        await self._send_webhook_single(title, error_message, include_mention=True)
+        await self._notify_via_sibling_accounts(title, error_message)
 
     async def play_beep(self):
         def _play():
@@ -329,19 +334,22 @@ class Security(commands.Cog):
         if not self.enabled: return
         if isinstance(message.channel, discord.DMChannel) and message.author.id == int(self.monitor_id):
             if (discord.utils.utcnow() - message.created_at).total_seconds() > 30: return
+            # This is the only reliable signal that captcha is actually completed.
+            # Verify-link click can stop reminder spam, but should not blindly resume.
             if "i have verified that you are human" in message.content.lower():
                 self.bot.paused = False
                 self.bot.throttle_until = 0.0
                 self.bot.last_sent_time = 0
                 self.bot.warmup_until = 0
                 self.bot.stats['captcha_active'] = False
+                self.bot.stats['captcha_status'] = 'resolved'
 
                 grinding_cog = self.bot.get_cog('Grinding')
                 if grinding_cog:
                     grinding_cog.cooldowns['hunt'] = 0
                     grinding_cog.cooldowns['battle'] = 0
                     grinding_cog.cooldowns['owo'] = 0
-                
+
                 self.bot.log("SUCCESS", "Verified detected in DM. Captcha solved successfully. Resuming...")
                 self.bot.log("INFO", "All cooldowns reset. Bot will resume in 2 seconds...")
                 await asyncio.sleep(2)
@@ -377,9 +385,13 @@ class Security(commands.Cog):
             if captcha_url:
                 self.bot.paused = True
                 self.bot.throttle_until = time.time() + 3600
+                self.bot.stats['captcha_status'] = 'pending'
+                self.bot.stats['captcha_alert_count'] = 0
                 self.bot.log("ALARM", "LINK CAPTCHA DETECTED IN DM!")
                 await self.play_beep()
                 self._show_desktop_notification("DM Captcha detected!")
+                self.bot.log("SYS", "Starting priority DM/webhook captcha alert loop immediately.")
+                self._start_continuous_captcha_alert("DM CAPTCHA", f"Solve link in DM: {captcha_url}")
                 
                 sec_cfg = self.bot.config.get("security", {})
                 sol_cfg = sec_cfg.get("captcha_solver", {})
@@ -387,26 +399,36 @@ class Security(commands.Cog):
                 # Who may VIEW/EDIT captcha_solver (admin dashboard session only) is enforced
                 # in dashboard/app.py; any account role may USE it here once configured.
                 autosolved = False
+                auto_attempted = False
                 fail_reason = None
                 if sol_cfg.get("enabled", True) and sol_cfg.get("api_key"):
+                    auto_attempted = True
                     self.bot.log("SYS", f"Attempting {self.bot.web_solver.provider} auto-solve for DM...")
-                    autosolved, fail_reason = await self.bot.web_solver.auto_verify()
+                    autosolved, fail_reason = await self.bot.web_solver.auto_verify(max_total_seconds=480)
                     if autosolved:
                         self.bot.log("SUCCESS", f"{self.bot.web_solver.provider} solved successfully (DM)!")
                         self._show_desktop_notification("Captcha solved successfully!")
-                    else:
+                        self.bot.stats['captcha_active'] = False
+                        self.bot.stats['captcha_status'] = 'resolved'
+                    elif self.bot.stats.get('captcha_status', 'pending') == 'pending':
                         self.bot.log("ERROR", f"{self.bot.web_solver.provider} auto-solve failed (DM): {fail_reason}")
                         self._show_desktop_notification("Auto-solve failed! Solve manually.")
+                        self.bot.stats['captcha_status'] = 'failed'
 
-                if not autosolved:
-                    self.bot.log("SYS", "Falling back to manual solve — starting DM/webhook alert loop.")
+                if (
+                    auto_attempted
+                    and not autosolved
+                    and self.bot.stats.get('captcha_status', 'pending') == 'failed'
+                ):
+                    self.bot.log("SYS", "Auto-solve failed; sending final fail notification.")
                     alert_msg = f"Solve link in DM: {captcha_url}"
                     if fail_reason:
                         alert_msg += f"\n\n⚠️ Auto-solve error ({self.bot.web_solver.provider}): {fail_reason}"
                     diag = self.bot.web_solver.get_last_diagnostic_summary()
                     if diag:
                         alert_msg += f"\n\n🧾 Trace: {diag}"
-                    self._start_continuous_captcha_alert("DM CAPTCHA", alert_msg)
+                    self.bot.stats['captcha_active'] = False
+                    await self._notify_captcha_failed("DM CAPTCHA", alert_msg, fail_reason)
                     if sys.platform == "win32" and sec_cfg.get("open_captcha_url_on_pc", False):
                         self.bot.log("SYS", "Opening Captcha in Browser with Auto-Login...")
                         asyncio.create_task(self.bot.web_solver.open_in_browser(captcha_url))
@@ -460,6 +482,8 @@ class Security(commands.Cog):
         if has_image and image_captcha_hit:
             self.bot.paused = True
             self.bot.throttle_until = time.time() + 3600
+            self.bot.stats['captcha_status'] = 'pending'
+            self.bot.stats['captcha_alert_count'] = 0
             self.bot.stats['last_captcha_msg'] = text_to_check[:200]
             self.bot.log("ALARM", "IMAGE CAPTCHA DETECTED! Warning triggered.")
             await self.play_beep()
@@ -478,28 +502,41 @@ class Security(commands.Cog):
         if captcha_url or captcha_keywords_hit:
             self.bot.paused = True
             self.bot.throttle_until = time.time() + 3600
+            self.bot.stats['captcha_status'] = 'pending'
+            self.bot.stats['captcha_alert_count'] = 0
             self.bot.stats['last_captcha_msg'] = text_to_check[:200]
             self.bot.log("ALARM", "CAPTCHA DETECTED!")
             await self.play_beep()
             self._show_desktop_notification("Captcha detected!")
+            self.bot.log("SYS", "Starting priority DM/webhook captcha alert loop immediately.")
+            self._start_continuous_captcha_alert("CAPTCHA DETECTED", f"Solve: {captcha_url or 'https://owobot.com/captcha'}")
             
             sec_cfg = self.bot.config.get("security", {})
             sol_cfg = sec_cfg.get("captcha_solver", {})
             
             autosolved = False
+            auto_attempted = False
             fail_reason = None
             if sol_cfg.get("enabled", True) and sol_cfg.get("api_key"):
+                auto_attempted = True
                 self.bot.log("SYS", f"Attempting {self.bot.web_solver.provider} auto-solve...")
-                autosolved, fail_reason = await self.bot.web_solver.auto_verify()
+                autosolved, fail_reason = await self.bot.web_solver.auto_verify(max_total_seconds=480)
                 if autosolved:
                     self.bot.log("SUCCESS", f"{self.bot.web_solver.provider} solved successfully!")
                     self._show_desktop_notification("Captcha solved successfully!")
-                else:
+                    self.bot.stats['captcha_active'] = False
+                    self.bot.stats['captcha_status'] = 'resolved'
+                elif self.bot.stats.get('captcha_status', 'pending') == 'pending':
                     self.bot.log("ERROR", f"{self.bot.web_solver.provider} auto-solve failed: {fail_reason}")
                     self._show_desktop_notification("Auto-solve failed! Solve manually.")
+                    self.bot.stats['captcha_status'] = 'failed'
 
-            if not autosolved:
-                self.bot.log("SYS", "Falling back to manual solve — starting DM/webhook alert loop.")
+            if (
+                auto_attempted
+                and not autosolved
+                and self.bot.stats.get('captcha_status', 'pending') == 'failed'
+            ):
+                self.bot.log("SYS", "Auto-solve failed; sending final fail notification.")
                 solve_link = captcha_url or "https://owobot.com/captcha"
                 alert_msg = f"Solve: {solve_link}"
                 if fail_reason:
@@ -507,7 +544,8 @@ class Security(commands.Cog):
                 diag = self.bot.web_solver.get_last_diagnostic_summary()
                 if diag:
                     alert_msg += f"\n\n🧾 Trace: {diag}"
-                self._start_continuous_captcha_alert("CAPTCHA DETECTED", alert_msg)
+                self.bot.stats['captcha_active'] = False
+                await self._notify_captcha_failed("CAPTCHA DETECTED", alert_msg, fail_reason)
                 if sys.platform == "win32" and sec_cfg.get("open_captcha_url_on_pc", False):
                     self.bot.log("SYS", "Opening Captcha in Browser with Auto-Login...")
                     asyncio.create_task(self.bot.web_solver.open_in_browser(captcha_url))
