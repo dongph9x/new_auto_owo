@@ -233,6 +233,11 @@
         "webhook": {
             "enabled": true,
             "url": "Your-own-discord-webhook-put-here-important-for-securtiy-alert-and-must-on-hosting"
+        },
+        "telegram": {
+            "enabled": false,
+            "token": "",
+            "chat_id": ""
         }
     },
     "battle_analysis": {

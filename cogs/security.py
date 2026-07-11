@@ -19,6 +19,7 @@ import unicodedata
 import requests
 import aiohttp
 import json
+import html
 from urllib.parse import quote
 import discord
 from discord.ext import commands
@@ -31,11 +32,6 @@ class Security(commands.Cog):
 
     def __init__(self, bot):
         self.bot = bot
-        cfg = bot.config.get('security', {})
-        self.enabled = cfg.get('enabled', True)
-        self.notifications_enabled = cfg.get('notifications', {}).get('enabled', True)
-        self.notification_title = cfg.get('notifications', {}).get('desktop', {}).get('title', "Neura Security Alert")
-        self.webhook_url = cfg.get('webhook_url')
         self.monitor_id = str(bot.config.get('core', {}).get('monitor_bot_id', '408785106942164992'))
         self.beep_file = os.path.join(os.path.dirname(os.path.dirname(os.path.abspath(__file__))), "beeps", "security_beep.mp3")
         self.ban_keywords = [
@@ -67,15 +63,22 @@ class Security(commands.Cog):
             "letterword"
         ]
         self._captcha_alert_task = None
+        self._refresh_security_settings()
 
     async def register_actions(self):
+        self._refresh_security_settings()
+        self.monitor_id = str(self.bot.config.get('core', {}).get('monitor_bot_id', '408785106942164992'))
+        self.bot.log("SYS", "Security Module settings refreshed (Live Sync).")
+
+    def _refresh_security_settings(self):
         cfg = self.bot.config.get('security', {})
         self.enabled = cfg.get('enabled', True)
         self.notifications_enabled = cfg.get('notifications', {}).get('enabled', True)
         self.notification_title = cfg.get('notifications', {}).get('desktop', {}).get('title', "Neura Security Alert")
-        self.webhook_url = cfg.get('webhook_url')
-        self.monitor_id = str(self.bot.config.get('core', {}).get('monitor_bot_id', '408785106942164992'))
-        self.bot.log("SYS", "Security Module settings refreshed (Live Sync).")
+        tg_cfg = cfg.get('telegram', {})
+        self.telegram_enabled = tg_cfg.get('enabled', False)
+        self.telegram_token = str(tg_cfg.get('token', '') or '').strip()
+        self.telegram_chat_id = str(tg_cfg.get('chat_id', '') or '').strip()
 
     def _normalize(self, text):
         if not text:
@@ -119,7 +122,46 @@ class Security(commands.Cog):
     def _send_webhook(self, title, message):
         """Fire-and-forget: schedules the webhook send + cross-account DM alert on the event loop."""
         asyncio.create_task(self._send_webhook_async(title, message))
+        asyncio.create_task(self._send_telegram_async(title, message, repeat_count=2, repeat_interval=10))
         asyncio.create_task(self._notify_via_sibling_accounts(title, message))
+
+    async def _send_telegram_async(self, title, message, repeat_count=1, repeat_interval=0):
+        if not self.telegram_enabled:
+            return
+        if not self.telegram_token or not self.telegram_chat_id:
+            return
+
+        safe_title = html.escape(str(title or "Security Alert"))
+        safe_message = html.escape(str(message or ""))
+        account = html.escape(str(self.bot.username or "Unknown"))
+        text = (
+            f"<b>{safe_title}</b>\n"
+            f"Account: <code>{account}</code>\n\n"
+            f"{safe_message}"
+        )
+        if len(text) > 3800:
+            text = text[:3797] + "..."
+
+        api_url = f"https://api.telegram.org/bot{self.telegram_token}/sendMessage"
+        payload = {
+            "chat_id": self.telegram_chat_id,
+            "text": text,
+            "parse_mode": "HTML",
+            "disable_web_page_preview": True
+        }
+        for i in range(max(1, int(repeat_count or 1))):
+            try:
+                if self.bot.session:
+                    async with self.bot.session.post(api_url, json=payload, timeout=aiohttp.ClientTimeout(total=5)):
+                        pass
+                else:
+                    requests.post(api_url, json=payload, timeout=5)
+            except Exception as e:
+                self.bot.log("ERROR", f"Telegram push failed: {e}")
+                break
+
+            if i < repeat_count - 1 and repeat_interval > 0:
+                await asyncio.sleep(repeat_interval)
 
     async def _send_webhook_async(self, title, message):
         cfg = self.bot.config.get('security', {})
@@ -205,6 +247,7 @@ class Security(commands.Cog):
         """One-shot webhook post, used by the continuous captcha loop (which handles
         its own repeat/interval timing, so it doesn't need _send_webhook_async's
         built-in repeat)."""
+        await self._send_telegram_async(title, message, repeat_count=1, repeat_interval=0)
         cfg = self.bot.config.get('security', {})
         wh_cfg = cfg.get('webhook', {})
         if not wh_cfg.get('enabled', True): return
