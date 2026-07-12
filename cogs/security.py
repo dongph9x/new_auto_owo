@@ -27,8 +27,8 @@ from plyer import notification
 import core.state as state
 
 class Security(commands.Cog):
-    CAPTCHA_TAG_INTERVAL_SECONDS = 120
-    CAPTCHA_RESOLVE_ON_REMINDER_COUNT = 5
+    CAPTCHA_TAG_INTERVAL_SECONDS = 60
+    CAPTCHA_TAG_MAX_ATTEMPTS = 3
 
     def __init__(self, bot):
         self.bot = bot
@@ -126,6 +126,7 @@ class Security(commands.Cog):
         asyncio.create_task(self._notify_via_sibling_accounts(title, message))
 
     async def _send_telegram_async(self, title, message, repeat_count=1, repeat_interval=0):
+        self._refresh_security_settings()
         if not self.telegram_enabled:
             return
         if not self.telegram_token or not self.telegram_chat_id:
@@ -283,15 +284,11 @@ class Security(commands.Cog):
             pass
 
     def _start_continuous_captcha_alert(self, title, message):
-        """Keep nagging (webhook + sibling-account DM) every 2 minutes while
-        captcha is still pending. The loop stops only when captcha is finalized
-        as resolved or failed."""
+        """Send captcha notices with max attempts/interval limits."""
         st = self.bot.stats
         already_active = st.get('captcha_active', False)
         st['captcha_active'] = True
-        st.setdefault('captcha_status', 'pending')
-        if not already_active:
-            st['captcha_alert_count'] = 0
+        st['captcha_alert_count'] = 0
 
         if already_active and self._captcha_alert_task and not self._captcha_alert_task.done():
             return  # already nagging, no need for a second overlapping loop
@@ -299,11 +296,7 @@ class Security(commands.Cog):
         self._captcha_alert_task = asyncio.create_task(self._captcha_alert_loop(title, message))
 
     async def _captcha_alert_loop(self, title, message):
-        while (
-            self.bot.stats.get('captcha_active')
-            and self.bot.paused
-            and self.bot.stats.get('captcha_status', 'pending') == 'pending'
-        ):
+        while self.bot.stats.get('captcha_active') and self.bot.paused:
             next_count = int(self.bot.stats.get('captcha_alert_count', 0)) + 1
             self.bot.stats['captcha_alert_count'] = next_count
             # Generate fresh expiring tokens each loop iteration so links don't go
@@ -317,13 +310,7 @@ class Security(commands.Cog):
             )
             await self._send_webhook_single(title, full_message, include_mention=True)
             await self._notify_via_sibling_accounts(title, full_message)
-            if next_count >= self.CAPTCHA_RESOLVE_ON_REMINDER_COUNT:
-                self.bot.stats['captcha_status'] = 'resolved'
-                self.bot.stats['captcha_active'] = False
-                self.bot.log(
-                    "SECURITY",
-                    f"Captcha alert reached reminder {self.CAPTCHA_RESOLVE_ON_REMINDER_COUNT}; marking resolved."
-                )
+            if next_count >= self.CAPTCHA_TAG_MAX_ATTEMPTS:
                 break
             await asyncio.sleep(self.CAPTCHA_TAG_INTERVAL_SECONDS)
 
@@ -334,8 +321,7 @@ class Security(commands.Cog):
         if fail_reason:
             error_message += f"\n\n❌ Captcha failed: {fail_reason}"
         error_message += "\n\n⚠️ Captcha đã fail, cần kiểm tra và xử lý thủ công."
-        await self._send_webhook_single(title, error_message, include_mention=True)
-        await self._notify_via_sibling_accounts(title, error_message)
+        self._start_continuous_captcha_alert(title, error_message)
 
     async def play_beep(self):
         def _play():
@@ -433,8 +419,6 @@ class Security(commands.Cog):
                 self.bot.log("ALARM", "LINK CAPTCHA DETECTED IN DM!")
                 await self.play_beep()
                 self._show_desktop_notification("DM Captcha detected!")
-                self.bot.log("SYS", "Starting priority DM/webhook captcha alert loop immediately.")
-                self._start_continuous_captcha_alert("DM CAPTCHA", f"Solve link in DM: {captcha_url}")
                 
                 sec_cfg = self.bot.config.get("security", {})
                 sol_cfg = sec_cfg.get("captcha_solver", {})
@@ -446,8 +430,9 @@ class Security(commands.Cog):
                 fail_reason = None
                 if sol_cfg.get("enabled", True) and sol_cfg.get("api_key"):
                     auto_attempted = True
+                    max_retry_seconds = int(sol_cfg.get("max_retry_seconds", self.bot.web_solver.max_retry_seconds))
                     self.bot.log("SYS", f"Attempting {self.bot.web_solver.provider} auto-solve for DM...")
-                    autosolved, fail_reason = await self.bot.web_solver.auto_verify(max_total_seconds=480)
+                    autosolved, fail_reason = await self.bot.web_solver.auto_verify(max_total_seconds=max_retry_seconds)
                     if autosolved:
                         self.bot.log("SUCCESS", f"{self.bot.web_solver.provider} solved successfully (DM)!")
                         self._show_desktop_notification("Captcha solved successfully!")
@@ -463,7 +448,12 @@ class Security(commands.Cog):
                     and not autosolved
                     and self.bot.stats.get('captcha_status', 'pending') == 'failed'
                 ):
-                    self.bot.log("SYS", "Auto-solve failed; sending final fail notification.")
+                    self.bot.log(
+                        "SYS",
+                        f"Auto-solve failed after max_retry_seconds="
+                        f"{int(sol_cfg.get('max_retry_seconds', self.bot.web_solver.max_retry_seconds))}; "
+                        "starting limited captcha notices."
+                    )
                     alert_msg = f"Solve link in DM: {captcha_url}"
                     if fail_reason:
                         alert_msg += f"\n\n⚠️ Auto-solve error ({self.bot.web_solver.provider}): {fail_reason}"
@@ -531,8 +521,6 @@ class Security(commands.Cog):
             self.bot.log("ALARM", "IMAGE CAPTCHA DETECTED! Warning triggered.")
             await self.play_beep()
             self._show_desktop_notification("Image captcha detected! Check DMs.")
-            img_urls = "\n".join([att.url for att in message.attachments])
-            self._start_continuous_captcha_alert("IMAGE CAPTCHA DETECTED", f"Message:\n{content}\n\nImages:\n{img_urls}")
             return
         captcha_keywords_hit = self._contains_keyword(text_to_check, self.captcha_keywords)
         captcha_url = self._get_captcha_url(message)
@@ -551,8 +539,6 @@ class Security(commands.Cog):
             self.bot.log("ALARM", "CAPTCHA DETECTED!")
             await self.play_beep()
             self._show_desktop_notification("Captcha detected!")
-            self.bot.log("SYS", "Starting priority DM/webhook captcha alert loop immediately.")
-            self._start_continuous_captcha_alert("CAPTCHA DETECTED", f"Solve: {captcha_url or 'https://owobot.com/captcha'}")
             
             sec_cfg = self.bot.config.get("security", {})
             sol_cfg = sec_cfg.get("captcha_solver", {})
@@ -562,8 +548,9 @@ class Security(commands.Cog):
             fail_reason = None
             if sol_cfg.get("enabled", True) and sol_cfg.get("api_key"):
                 auto_attempted = True
+                max_retry_seconds = int(sol_cfg.get("max_retry_seconds", self.bot.web_solver.max_retry_seconds))
                 self.bot.log("SYS", f"Attempting {self.bot.web_solver.provider} auto-solve...")
-                autosolved, fail_reason = await self.bot.web_solver.auto_verify(max_total_seconds=480)
+                autosolved, fail_reason = await self.bot.web_solver.auto_verify(max_total_seconds=max_retry_seconds)
                 if autosolved:
                     self.bot.log("SUCCESS", f"{self.bot.web_solver.provider} solved successfully!")
                     self._show_desktop_notification("Captcha solved successfully!")
@@ -579,7 +566,12 @@ class Security(commands.Cog):
                 and not autosolved
                 and self.bot.stats.get('captcha_status', 'pending') == 'failed'
             ):
-                self.bot.log("SYS", "Auto-solve failed; sending final fail notification.")
+                self.bot.log(
+                    "SYS",
+                    f"Auto-solve failed after max_retry_seconds="
+                    f"{int(sol_cfg.get('max_retry_seconds', self.bot.web_solver.max_retry_seconds))}; "
+                    "starting limited captcha notices."
+                )
                 solve_link = captcha_url or "https://owobot.com/captcha"
                 alert_msg = f"Solve: {solve_link}"
                 if fail_reason:
