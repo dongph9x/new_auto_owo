@@ -14,6 +14,7 @@ import asyncio
 import time
 import re
 import os
+import random
 import threading
 import unicodedata
 import requests
@@ -357,6 +358,86 @@ class Security(commands.Cog):
                     return url
         return None
 
+    def _extract_letterword_count(self, text):
+        if not text:
+            return None
+        normalized = self._normalize(text)
+        patterns = [
+            r'(\d{1,2})letterword',
+            r'letterword(\d{1,2})',
+            r'following(\d{1,2})letterword',
+        ]
+        for pattern in patterns:
+            match = re.search(pattern, normalized)
+            if not match:
+                continue
+            count = int(match.group(1))
+            if 2 <= count <= 12:
+                return count
+
+        raw_match = re.search(r'(\d{1,2})\s*(?:letter\s*word|letters?)', text.lower())
+        if raw_match:
+            count = int(raw_match.group(1))
+            if 2 <= count <= 12:
+                return count
+        return None
+
+    async def _solve_letterword_nopecha(self, image_url, letter_count):
+        sec_cfg = self.bot.config.get("security", {})
+        sol_cfg = sec_cfg.get("captcha_solver", {})
+        api_key = str(sol_cfg.get("api_key", "") or "").strip()
+        provider = str(sol_cfg.get("provider", "") or "").strip().lower()
+        if not api_key or provider != "nopecha":
+            return ""
+
+        endpoint = "https://api.nopecha.com/"
+        timeout = aiohttp.ClientTimeout(total=10)
+        session = self.bot.session or aiohttp.ClientSession()
+        owns_session = self.bot.session is None
+        try:
+            payload = {
+                "key": api_key,
+                "type": "textcaptcha",
+                "image_urls": [image_url],
+            }
+            async with session.post(endpoint, json=payload, timeout=timeout) as resp:
+                if resp.status != 200:
+                    self.bot.log("WARN", f"NopeCHA textcaptcha submit failed (HTTP {resp.status}).")
+                    return ""
+                data = await resp.json()
+
+            job_id = data.get("data")
+            if not job_id:
+                self.bot.log("WARN", f"NopeCHA textcaptcha submit rejected: {data}")
+                return ""
+
+            deadline = time.time() + 25
+            while time.time() < deadline:
+                await asyncio.sleep(2)
+                async with session.get(endpoint, params={"key": api_key, "id": job_id}, timeout=timeout) as poll_resp:
+                    if poll_resp.status != 200:
+                        continue
+                    poll_data = await poll_resp.json()
+
+                result = poll_data.get("data")
+                if result:
+                    if isinstance(result, list):
+                        result = result[0] if result else ""
+                    cleaned = re.sub(r'[^a-zA-Z]', '', str(result or ''))
+                    return cleaned
+
+                err = poll_data.get("error")
+                if err is not None and err != 14:
+                    self.bot.log("WARN", f"NopeCHA textcaptcha polling error: {poll_data}")
+                    return ""
+        except Exception as e:
+            self.bot.log("ERROR", f"NopeCHA textcaptcha fallback failed: {e}")
+            return ""
+        finally:
+            if owns_session:
+                await session.close()
+        return ""
+
 
     @commands.Cog.listener()
     async def on_message(self, message):
@@ -384,26 +465,59 @@ class Security(commands.Cog):
                 await asyncio.sleep(2)
                 return
 
-            if "letterword" in message.content.lower() and message.attachments:
+            normalized_dm = self._normalize(message.content or "")
+            if "letterword" in normalized_dm and message.attachments:
                 self.bot.log("SECURITY", "Detection AI: Letterword captcha identified in DMs.")
  
-                count_match = re.search(r'(\d+)\s*letterword', message.content.lower())
-                letter_count = int(count_match.group(1)) if count_match else 5
+                letter_count = self._extract_letterword_count(message.content or "") or 5
                 
                 image_url = message.attachments[0].url
 
                 self.bot.log("SYS", f"Attempting to solve DM Captcha ({letter_count} letters)...")
                 answer = await self.bot.captcha_solver.solve_image(image_url, letter_count)
+
+                cleaned = re.sub(r'[^a-zA-Z]', '', str(answer or ''))
+                answer = cleaned
+
+                if not answer and self.bot.session:
+                    # Fallback to the same image-letter solver used by huntbot flow.
+                    try:
+                        import modules.nhuntbotsolver as huntbot_solver
+                        self.bot.log("SYS", "Primary DM solver empty/mismatch; trying huntbot solver fallback...")
+                        hb_answer = await huntbot_solver.solveHbCaptcha(image_url, self.bot.session)
+                        hb_clean = re.sub(r'[^a-zA-Z]', '', str(hb_answer or ''))
+                        answer = hb_clean
+                    except Exception as e:
+                        self.bot.log("ERROR", f"Huntbot solver fallback failed: {e}")
+
+                if not answer:
+                    self.bot.log("SYS", "Trying NopeCHA textcaptcha fallback...")
+                    answer = await self._solve_letterword_nopecha(image_url, letter_count)
                 
                 if answer:
-                    self.bot.log("SUCCESS", f"AI Solver Answer: {answer}. Sending to OwO...")
+                    answer_to_send = answer.upper()
+                    self.bot.log("SUCCESS", f"AI Solver Answer: {answer_to_send}. Sending to OwO...")
                     await asyncio.sleep(random.uniform(2.0, 4.0))
                     async with message.channel.typing():
-                        await asyncio.sleep(len(answer) * 0.1)
-                        await message.channel.send(answer)
+                        await asyncio.sleep(len(answer_to_send) * 0.1)
+                        await message.channel.send(answer_to_send)
                 else:
                     self.bot.log("ERROR", "AI Solver failed to generate an answer.")
                     self._show_desktop_notification("AI Solver failed! Solve manually.")
+                    self.bot.paused = True
+                    self.bot.throttle_until = time.time() + 3600
+                    self.bot.stats['captcha_status'] = 'failed'
+                    self.bot.stats['last_captcha_msg'] = (message.content or "")[:200]
+                    fail_msg = (
+                        f"Không auto-solve được DM letterword captcha.\n"
+                        f"Image: {image_url}\n\n"
+                        f"Hãy DM đáp án captcha thủ công cho OwO để verify."
+                    )
+                    await self._notify_captcha_failed(
+                        "DM LETTER CAPTCHA",
+                        fail_msg,
+                        "Auto solver failed for letterword captcha"
+                    )
                 return
 
             captcha_url = self._get_captcha_url(message)
