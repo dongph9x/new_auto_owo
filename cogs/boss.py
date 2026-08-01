@@ -25,11 +25,26 @@ class Boss(commands.Cog):
         self.bot = bot
         self.state_file = "data/boss_state.json"
         self._load_state()
-        self.enabled = self.bot.config.get("boss", {}).get("enabled", True)
-        self.join_chance = self.bot.config.get("boss", {}).get("join_chance", 100)
-        self.join_all = self.bot.config.get("boss", {}).get("join_all_guilds", True)
-        self.ignore_guilds = [str(g) for g in self.bot.config.get("boss", {}).get("ignore_guilds", [])]
         self.playing_guild_ids = set()
+        self._refresh_settings()
+
+    def _normalize_channel_id(self, value):
+        text = str(value or "").strip()
+        if not text:
+            return None
+        try:
+            return str(int(text))
+        except (TypeError, ValueError):
+            return None
+
+    def _refresh_settings(self):
+        cfg = self.bot.config.get("boss", {})
+        self.enabled = cfg.get("enabled", True)
+        self.join_chance = cfg.get("join_chance", 100)
+        self.join_all = cfg.get("join_all_guilds", True)
+        self.ignore_guilds = [str(g) for g in cfg.get("ignore_guilds", [])]
+        # Dedicated channel for boss spawn/join. When set, only that channel is used.
+        self.boss_channel_id = self._normalize_channel_id(cfg.get("channel_id"))
         self._update_playing_guilds()
 
     def _update_playing_guilds(self):
@@ -42,14 +57,28 @@ class Boss(commands.Cog):
         if hasattr(self.bot, 'guild_id') and self.bot.guild_id:
             self.playing_guild_ids.add(str(self.bot.guild_id))
 
+        if self.boss_channel_id:
+            try:
+                ch = self.bot.get_channel(int(self.boss_channel_id))
+                if ch and ch.guild:
+                    self.playing_guild_ids.add(str(ch.guild.id))
+            except Exception:
+                pass
+
     async def register_actions(self):
-        cfg = self.bot.config.get("boss", {})
-        self.enabled = cfg.get("enabled", True)
-        self.join_chance = cfg.get("join_chance", 100)
-        self.join_all = cfg.get("join_all_guilds", True)
-        self.ignore_guilds = [str(g) for g in cfg.get("ignore_guilds", [])]
-        self._update_playing_guilds()
-        self.bot.log("SYS", f"Boss Battle settings refreshed. Tracking {len(self.playing_guild_ids)} guilds.")
+        self._refresh_settings()
+        if self.boss_channel_id:
+            self.bot.log(
+                "SYS",
+                f"Boss Battle settings refreshed. Dedicated channel={self.boss_channel_id}."
+            )
+        else:
+            self.bot.log(
+                "SYS",
+                f"Boss Battle settings refreshed. No dedicated channel; "
+                f"tracking {len(self.playing_guild_ids)} guilds "
+                f"(join_all_guilds={self.join_all})."
+            )
 
     def _load_state(self):
         self.tickets = 3
@@ -82,11 +111,39 @@ class Boss(commands.Cog):
             self.joined_ids.clear()
             self._save_state()
 
+    def _is_ticket_sync_channel(self, channel_id):
+        allowed = set()
+        if self.bot.channel_id:
+            allowed.add(str(self.bot.channel_id))
+        if self.boss_channel_id:
+            allowed.add(str(self.boss_channel_id))
+        return str(channel_id) in allowed
+
+    def _can_join_channel(self, channel_id, guild_id):
+        """Prefer dedicated boss.channel_id when configured; else legacy rules."""
+        if self.boss_channel_id:
+            return str(channel_id) == self.boss_channel_id
+
+        if self.join_all:
+            return True
+
+        configured_channels = [str(c) for c in self.bot.channels]
+        if str(channel_id) in configured_channels or str(channel_id) == str(self.bot.channel_id):
+            return True
+        if str(guild_id) in self.playing_guild_ids:
+            self.bot.log(
+                "BOSS",
+                f"Server-wide detected: Boss in non-playing channel ({channel_id}) "
+                f"of playing guild ({guild_id})."
+            )
+            return True
+        return False
+
     @commands.Cog.listener()
     async def on_message(self, message):
         if str(message.author.id) != self.bot.owo_bot_id:
             return
-        if message.channel.id != self.bot.channel_id:
+        if not self._is_ticket_sync_channel(message.channel.id):
             return
 
         if not self.bot.is_message_for_me(message):
@@ -148,21 +205,10 @@ class Boss(commands.Cog):
         channel_id = int(data.get("channel_id"))
         guild_id = str(data.get("guild_id") or "")
 
-
         if guild_id in [str(g) for g in self.ignore_guilds]:
             return
-        can_join = False
-        if self.join_all:
-            can_join = True
-        else:
-            configured_channels = [str(c) for c in self.bot.channels]
-            if str(channel_id) in configured_channels or str(channel_id) == str(self.bot.channel_id):
-                can_join = True
-            elif guild_id in self.playing_guild_ids:
-                can_join = True
-                self.bot.log("BOSS", f"Server-wide detected: Boss in non-playing channel ({channel_id}) of playing guild ({guild_id}).")
 
-        if not can_join:
+        if not self._can_join_channel(channel_id, guild_id):
             return
 
         if not fight_btn:

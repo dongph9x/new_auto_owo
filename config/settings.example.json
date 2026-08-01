@@ -247,6 +247,7 @@
     },
     "boss": {
         "enabled": true,
+        "channel_id": "",
         "ignore_guilds": [],
         "join_all_guilds": false,
         "join_chance": 100
