@@ -324,6 +324,149 @@ class Security(commands.Cog):
         error_message += "\n\n⚠️ Captcha đã fail, cần kiểm tra và xử lý thủ công."
         self._start_continuous_captcha_alert(title, error_message)
 
+    def _captcha_already_resolved(self):
+        """True if auto-solve/manual flow already cleared this captcha."""
+        status = self.bot.stats.get('captcha_status', 'pending')
+        if status == 'resolved':
+            return True
+        # User resumed / cleared alert while we were waiting out the budget.
+        if not self.bot.paused and not self.bot.stats.get('captcha_active'):
+            return True
+        return False
+
+    async def _run_autosolve_then_notify_if_needed(self, title, base_message, captcha_url=None):
+        """Block initial remote noti. From detect:
+        1) start auto-solve (budget = max_retry_seconds)
+        2) count until max_retry_seconds
+        3) only then consider webhook/tele push — skip if already resolved
+        Success early exits (no push). Failure/pending waits out the full window.
+        """
+        sec_cfg = self.bot.config.get("security", {})
+        sol_cfg = sec_cfg.get("captcha_solver", {})
+        max_retry_seconds = max(
+            1,
+            int(sol_cfg.get("max_retry_seconds", self.bot.web_solver.max_retry_seconds)),
+        )
+        deadline = time.time() + max_retry_seconds
+
+        self.bot.log(
+            "SYS",
+            f"Captcha budget started: max_retry_seconds={max_retry_seconds}s "
+            f"(remote noti deferred until deadline; skipped if auto-solve succeeds)."
+        )
+
+        autosolved = False
+        fail_reason = None
+        solve_task = None
+        solve_finished = False
+
+        if sol_cfg.get("enabled", True) and sol_cfg.get("api_key"):
+            self.bot.log(
+                "SYS",
+                f"Attempting {self.bot.web_solver.provider} auto-solve "
+                f"(max_retry_seconds={max_retry_seconds})..."
+            )
+            solve_task = asyncio.create_task(
+                self.bot.web_solver.auto_verify(max_total_seconds=max_retry_seconds)
+            )
+        else:
+            self.bot.log(
+                "SYS",
+                "Captcha solver disabled or missing api_key; "
+                "waiting full max_retry_seconds before remote noti check."
+            )
+
+        while True:
+            if self._captcha_already_resolved():
+                self.bot.log("SYS", "Captcha already resolved — skip remote noti.")
+                self.bot.stats['captcha_active'] = False
+                return True
+
+            if solve_task is not None and not solve_finished and solve_task.done():
+                solve_finished = True
+                try:
+                    autosolved, fail_reason = solve_task.result()
+                except Exception as e:
+                    autosolved, fail_reason = False, str(e)
+
+                if autosolved:
+                    self.bot.log("SUCCESS", f"{self.bot.web_solver.provider} solved successfully!")
+                    self._show_desktop_notification("Captcha solved successfully!")
+                    self.bot.stats['captcha_active'] = False
+                    self.bot.stats['captcha_status'] = 'resolved'
+                    return True  # resolved early → never push
+
+                if self.bot.stats.get('captcha_status', 'pending') == 'pending':
+                    self.bot.stats['captcha_status'] = 'failed'
+                self.bot.log(
+                    "WARN",
+                    f"Auto-solve finished unresolved before deadline: {fail_reason}. "
+                    f"Remote noti still deferred until max_retry_seconds={max_retry_seconds}s."
+                )
+
+            remaining = deadline - time.time()
+            if remaining <= 0:
+                break
+            await asyncio.sleep(min(1.0, remaining))
+
+        # Deadline reached — final resolve check before push.
+        if solve_task is not None and not solve_finished:
+            if solve_task.done():
+                try:
+                    autosolved, fail_reason = solve_task.result()
+                except Exception as e:
+                    autosolved, fail_reason = False, str(e)
+            else:
+                fail_reason = (
+                    f"auto-solve still running after max_retry_seconds={max_retry_seconds}s"
+                )
+                self.bot.log("WARN", fail_reason)
+
+        if autosolved or self._captcha_already_resolved():
+            if autosolved:
+                self.bot.log("SUCCESS", f"{self.bot.web_solver.provider} solved successfully!")
+                self._show_desktop_notification("Captcha solved successfully!")
+                self.bot.stats['captcha_status'] = 'resolved'
+            else:
+                self.bot.log("SYS", "Captcha resolved at deadline — skip remote noti.")
+            self.bot.stats['captcha_active'] = False
+            return True
+
+        # Still unresolved at max_retry_seconds → push webhook/tele now.
+        if fail_reason:
+            self.bot.log("ERROR", f"Auto-solve unresolved at deadline: {fail_reason}")
+            self._show_desktop_notification("Auto-solve failed! Solve manually.")
+        else:
+            self.bot.log(
+                "SYS",
+                f"max_retry_seconds={max_retry_seconds}s elapsed; "
+                "captcha still unresolved — pushing remote noti."
+            )
+            self._show_desktop_notification("Captcha still pending after auto-solve budget!")
+
+        self.bot.stats['captcha_status'] = 'failed'
+        alert_msg = base_message
+        if fail_reason:
+            provider = getattr(self.bot.web_solver, 'provider', 'solver')
+            alert_msg += f"\n\n⚠️ Auto-solve error ({provider}): {fail_reason}"
+        if sol_cfg.get("enabled", True) and sol_cfg.get("api_key"):
+            diag = self.bot.web_solver.get_last_diagnostic_summary()
+            if diag:
+                alert_msg += f"\n\n🧾 Trace: {diag}"
+
+        self.bot.stats['captcha_active'] = False
+        await self._notify_captcha_failed(title, alert_msg, fail_reason)
+
+        if (
+            captcha_url
+            and sys.platform == "win32"
+            and sec_cfg.get("open_captcha_url_on_pc", False)
+        ):
+            self.bot.log("SYS", "Opening Captcha in Browser with Auto-Login...")
+            asyncio.create_task(self.bot.web_solver.open_in_browser(captcha_url))
+
+        return False
+
     async def play_beep(self):
         def _play():
             if not os.path.exists(self.beep_file):
@@ -533,53 +676,12 @@ class Security(commands.Cog):
                 self.bot.log("ALARM", "LINK CAPTCHA DETECTED IN DM!")
                 await self.play_beep()
                 self._show_desktop_notification("DM Captcha detected!")
-                
-                sec_cfg = self.bot.config.get("security", {})
-                sol_cfg = sec_cfg.get("captcha_solver", {})
-
-                # Who may VIEW/EDIT captcha_solver (admin dashboard session only) is enforced
-                # in dashboard/app.py; any account role may USE it here once configured.
-                autosolved = False
-                auto_attempted = False
-                fail_reason = None
-                if sol_cfg.get("enabled", True) and sol_cfg.get("api_key"):
-                    auto_attempted = True
-                    max_retry_seconds = int(sol_cfg.get("max_retry_seconds", self.bot.web_solver.max_retry_seconds))
-                    self.bot.log("SYS", f"Attempting {self.bot.web_solver.provider} auto-solve for DM...")
-                    autosolved, fail_reason = await self.bot.web_solver.auto_verify(max_total_seconds=max_retry_seconds)
-                    if autosolved:
-                        self.bot.log("SUCCESS", f"{self.bot.web_solver.provider} solved successfully (DM)!")
-                        self._show_desktop_notification("Captcha solved successfully!")
-                        self.bot.stats['captcha_active'] = False
-                        self.bot.stats['captcha_status'] = 'resolved'
-                    elif self.bot.stats.get('captcha_status', 'pending') == 'pending':
-                        self.bot.log("ERROR", f"{self.bot.web_solver.provider} auto-solve failed (DM): {fail_reason}")
-                        self._show_desktop_notification("Auto-solve failed! Solve manually.")
-                        self.bot.stats['captcha_status'] = 'failed'
-
-                if (
-                    auto_attempted
-                    and not autosolved
-                    and self.bot.stats.get('captcha_status', 'pending') == 'failed'
-                ):
-                    self.bot.log(
-                        "SYS",
-                        f"Auto-solve failed after max_retry_seconds="
-                        f"{int(sol_cfg.get('max_retry_seconds', self.bot.web_solver.max_retry_seconds))}; "
-                        "starting limited captcha notices."
-                    )
-                    alert_msg = f"Solve link in DM: {captcha_url}"
-                    if fail_reason:
-                        alert_msg += f"\n\n⚠️ Auto-solve error ({self.bot.web_solver.provider}): {fail_reason}"
-                    diag = self.bot.web_solver.get_last_diagnostic_summary()
-                    if diag:
-                        alert_msg += f"\n\n🧾 Trace: {diag}"
-                    self.bot.stats['captcha_active'] = False
-                    await self._notify_captcha_failed("DM CAPTCHA", alert_msg, fail_reason)
-                    if sys.platform == "win32" and sec_cfg.get("open_captcha_url_on_pc", False):
-                        self.bot.log("SYS", "Opening Captcha in Browser with Auto-Login...")
-                        asyncio.create_task(self.bot.web_solver.open_in_browser(captcha_url))
-
+                # No remote noti yet — wait full max_retry_seconds, then push only if unresolved.
+                await self._run_autosolve_then_notify_if_needed(
+                    "DM CAPTCHA",
+                    f"Solve link in DM: {captcha_url}",
+                    captcha_url=captcha_url,
+                )
                 return
         if str(message.author.id) != self.monitor_id: return
         
@@ -653,52 +755,13 @@ class Security(commands.Cog):
             self.bot.log("ALARM", "CAPTCHA DETECTED!")
             await self.play_beep()
             self._show_desktop_notification("Captcha detected!")
-            
-            sec_cfg = self.bot.config.get("security", {})
-            sol_cfg = sec_cfg.get("captcha_solver", {})
-            
-            autosolved = False
-            auto_attempted = False
-            fail_reason = None
-            if sol_cfg.get("enabled", True) and sol_cfg.get("api_key"):
-                auto_attempted = True
-                max_retry_seconds = int(sol_cfg.get("max_retry_seconds", self.bot.web_solver.max_retry_seconds))
-                self.bot.log("SYS", f"Attempting {self.bot.web_solver.provider} auto-solve...")
-                autosolved, fail_reason = await self.bot.web_solver.auto_verify(max_total_seconds=max_retry_seconds)
-                if autosolved:
-                    self.bot.log("SUCCESS", f"{self.bot.web_solver.provider} solved successfully!")
-                    self._show_desktop_notification("Captcha solved successfully!")
-                    self.bot.stats['captcha_active'] = False
-                    self.bot.stats['captcha_status'] = 'resolved'
-                elif self.bot.stats.get('captcha_status', 'pending') == 'pending':
-                    self.bot.log("ERROR", f"{self.bot.web_solver.provider} auto-solve failed: {fail_reason}")
-                    self._show_desktop_notification("Auto-solve failed! Solve manually.")
-                    self.bot.stats['captcha_status'] = 'failed'
-
-            if (
-                auto_attempted
-                and not autosolved
-                and self.bot.stats.get('captcha_status', 'pending') == 'failed'
-            ):
-                self.bot.log(
-                    "SYS",
-                    f"Auto-solve failed after max_retry_seconds="
-                    f"{int(sol_cfg.get('max_retry_seconds', self.bot.web_solver.max_retry_seconds))}; "
-                    "starting limited captcha notices."
-                )
-                solve_link = captcha_url or "https://owobot.com/captcha"
-                alert_msg = f"Solve: {solve_link}"
-                if fail_reason:
-                    alert_msg += f"\n\n⚠️ Auto-solve error ({self.bot.web_solver.provider}): {fail_reason}"
-                diag = self.bot.web_solver.get_last_diagnostic_summary()
-                if diag:
-                    alert_msg += f"\n\n🧾 Trace: {diag}"
-                self.bot.stats['captcha_active'] = False
-                await self._notify_captcha_failed("CAPTCHA DETECTED", alert_msg, fail_reason)
-                if sys.platform == "win32" and sec_cfg.get("open_captcha_url_on_pc", False):
-                    self.bot.log("SYS", "Opening Captcha in Browser with Auto-Login...")
-                    asyncio.create_task(self.bot.web_solver.open_in_browser(captcha_url))
-
+            # No remote noti yet — wait full max_retry_seconds, then push only if unresolved.
+            solve_link = captcha_url or "https://owobot.com/captcha"
+            await self._run_autosolve_then_notify_if_needed(
+                "CAPTCHA DETECTED",
+                f"Solve: {solve_link}",
+                captcha_url=captcha_url,
+            )
             return
 
 async def setup(bot):
