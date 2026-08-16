@@ -720,11 +720,15 @@ class Security(commands.Cog):
             if any(kw in normalized for kw in ["pleasecomplete", "captcha", "verify", "human"]):
                 self.bot.paused = True
                 self.bot.throttle_until = time.time() + 3600
+                self.bot.stats['captcha_status'] = 'pending'
                 self.bot.stats['last_captcha_msg'] = text_to_check[:200]
                 self.bot.log("ALARM", f"CAPTCHA WARNING DETECTED ({current_warning}/{max_warnings})!")
                 await self.play_beep()
                 self._show_desktop_notification(f"Captcha warning {current_warning}/{max_warnings} detected!")
-                self._send_webhook("CAPTCHA WARNING", f"Warning {current_warning}/{max_warnings}\nMessage:\n{content}")
+                self._start_continuous_captcha_alert(
+                    "CAPTCHA WARNING",
+                    f"Warning {current_warning}/{max_warnings}\nMessage:\n{content}"
+                )
                 return
         has_image = len(message.attachments) > 0
         image_captcha_hit = self._contains_keyword(text_to_check, self.image_captcha_keywords)

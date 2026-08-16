@@ -594,6 +594,8 @@ def control():
         bot.log("SYS", "Bot STOPPED via Dashboard")
             
     elif action == 'start':
+        if bot.stats.get('captcha_status') == 'pending':
+            return jsonify({'success': False, 'error': 'Captcha chưa verify, không thể resume.'})
         bot.paused = False
         bot.throttle_until = 0
         bot.log("SYS", "Bot RESUMED via Dashboard")
@@ -626,9 +628,11 @@ def security():
     if not bot: return jsonify({'success': False, 'error': 'Bot not found'})
 
     if action == 'resume':
+        uid = str(bot.user.id) if bot.user else account_id
+        if state.account_stats.get(uid, {}).get('captcha_status') == 'pending':
+            return jsonify({'success': False, 'error': 'Captcha chưa verify, không thể resume.'})
         bot.paused = False
         bot.throttle_until = 0
-        uid = str(bot.user.id) if bot.user else account_id
         if uid in state.account_stats:
             state.account_stats[uid]['captcha_active'] = False
         state.log_command("SEC", f"User Resumed {bot.username} from Security Alert", "success")

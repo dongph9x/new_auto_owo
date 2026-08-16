@@ -33,10 +33,15 @@ class Control(commands.Cog):
                 
         elif content == '.start' or content == '.resume':
             if self.bot.paused:
+                if self.bot.stats.get('captcha_status') == 'pending':
+                    self.bot.log("SYS", "Resume blocked: captcha still pending verification.")
+                    return
                 self.bot.paused = False
                 state.bot_paused = False
                 state.active_session_start = time.time()
                 for bot in state.bot_instances:
+                    if bot.stats.get('captcha_status') == 'pending':
+                        continue  # leave captcha-locked accounts paused
                     bot.paused = False
                     bot.throttle_until = 0
                 self.bot.log("SYS", "Bot RESUMED via Chat cmd")

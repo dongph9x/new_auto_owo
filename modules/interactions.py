@@ -119,22 +119,30 @@ class InteractionManager:
         }
 
 
-    async def click_button(self, custom_id, message, guild_id=None):
+    async def click_button(self, custom_id, message, guild_id=None, component_id=None):
         if not custom_id or not message:
             return False
-            
+
         return await self.click_button_raw(
             custom_id=custom_id,
             message_id=message.id,
             channel_id=message.channel.id,
             guild_id=guild_id or (message.guild.id if message.guild else None),
             author_id=message.author.id,
-            flags=message.flags.value
+            flags=message.flags.value,
+            component_id=component_id
         )
 
-    async def click_button_raw(self, custom_id, message_id, channel_id, author_id, guild_id=None, flags=0):
+    async def click_button_raw(self, custom_id, message_id, channel_id, author_id, guild_id=None, flags=0, component_id=None):
         if not custom_id:
             return False
+
+        data = {
+            "component_type": 2,
+            "custom_id": custom_id
+        }
+        if component_id is not None:
+            data["id"] = component_id
 
         payload = {
             "type": 3,
@@ -144,10 +152,7 @@ class InteractionManager:
             "message_id": str(message_id),
             "session_id": self.bot.ws.session_id if hasattr(self.bot, 'ws') else None,
             "message_flags": flags,
-            "data": {
-                "component_type": 2,
-                "custom_id": custom_id
-            }
+            "data": data
         }
 
         headers = await self._get_headers(channel_id=channel_id, guild_id=guild_id)

@@ -244,7 +244,8 @@ class Boss(commands.Cog):
             channel_id=channel_id,
             author_id=data.get("author", {}).get("id"),
             guild_id=guild_id,
-            flags=data.get("flags", 0)
+            flags=data.get("flags", 0),
+            component_id=fight_btn.id
         )
 
         if success:
