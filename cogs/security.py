@@ -214,6 +214,10 @@ class Security(commands.Cog):
         this account's owner about the incident — stop as soon as one gets through,
         no need to spam from every sibling once the alert has landed.
         """
+        cfg = self.bot.config.get('security', {})
+        if not cfg.get('dm_alert', {}).get('enabled', True):
+            return
+
         target_id = getattr(self.bot, 'user_id', None)
         if not target_id:
             return
