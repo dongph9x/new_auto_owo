@@ -20,7 +20,7 @@ from discord.ext import commands
 # Tuning lives here on purpose — this monitor is not exposed in settings.json.
 INTERVAL_MINUTES = [1, 2, 3]   # one of these is picked at random before every ping
 INTERVAL_JITTER_S = 10         # so pings never land on an exact minute boundary
-RECOVERY_INTERVAL_S = 10       # while paused by this cog, re-ping this often to catch recovery fast
+RECOVERY_INTERVAL_S = (10, 30) # while paused by this cog, re-ping after a random delay in this range
 LATENCY_THRESHOLD_MS = 100      # OwO's own reported latency above this counts as "down"
 RESPONSE_TIMEOUT_S = 15        # no pong within this window also counts as "down"
 FAIL_STREAK = 1                # consecutive bad checks required before pausing
@@ -37,8 +37,8 @@ class OwOHealth(commands.Cog):
     bot. In that case the account is paused and a webhook alert is pushed.
 
     The ping loop keeps running while the account is paused *by this cog* —
-    every RECOVERY_INTERVAL_S instead of every few minutes — so a recovered
-    OwO un-pauses it within seconds. It never pings while the
+    every 10-30s (RECOVERY_INTERVAL_S) instead of every few minutes — so a
+    recovered OwO un-pauses it quickly. It never pings while the
     account is paused for any other reason (captcha, ban, manual .stop).
     """
 
@@ -68,7 +68,7 @@ class OwOHealth(commands.Cog):
 
     def _next_wait(self):
         if self.paused_by_me:
-            return RECOVERY_INTERVAL_S
+            return random.uniform(*RECOVERY_INTERVAL_S)
         minutes = random.choice(INTERVAL_MINUTES)
         return max(30.0, minutes * 60 + random.uniform(-INTERVAL_JITTER_S, INTERVAL_JITTER_S))
 
