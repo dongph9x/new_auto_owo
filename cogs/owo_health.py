@@ -20,10 +20,11 @@ from discord.ext import commands
 # Tuning lives here on purpose — this monitor is not exposed in settings.json.
 INTERVAL_MINUTES = [1, 2, 3]   # one of these is picked at random before every ping
 INTERVAL_JITTER_S = 10         # so pings never land on an exact minute boundary
+CONFIRM_INTERVAL_S = (5, 8)    # after a bad ping, re-check quickly (random delay) to confirm the outage
 RECOVERY_INTERVAL_S = (15, 30) # while paused by this cog, re-ping after a random delay in this range
 LATENCY_THRESHOLD_MS = 100      # OwO's own reported latency above this counts as "down"
-RESPONSE_TIMEOUT_S = 5        # no pong within this window also counts as "down"
-FAIL_STREAK = 1                # consecutive bad checks required before pausing
+RESPONSE_TIMEOUT_S = 5         # no pong within this window also counts as "down"
+FAIL_STREAK = 3                # consecutive bad checks required before pausing
 AUTO_RESUME = True             # un-pause by itself once OwO answers healthily again
 ALERT_ON_RECOVER = True        # also webhook the recovery, not just the outage
 
@@ -34,10 +35,12 @@ class OwOHealth(commands.Cog):
     OwO answers with something like `🏓 | ...pong! In 42ms`. When that number
     climbs past LATENCY_THRESHOLD_MS — or when no reply arrives at all — OwO is
     lagging/down, so keeping the farm running just burns commands into a dead
-    bot. In that case the account is paused and a webhook alert is pushed.
+    bot. A single bad ping only triggers quick re-checks every 5-8s
+    (CONFIRM_INTERVAL_S); after FAIL_STREAK bad pings in a row the account is
+    paused and a webhook alert is pushed.
 
     The ping loop keeps running while the account is paused *by this cog* —
-    every 10-30s (RECOVERY_INTERVAL_S) instead of every few minutes — so a
+    every 15-30s (RECOVERY_INTERVAL_S) instead of every few minutes — so a
     recovered OwO un-pauses it quickly. It never pings while the
     account is paused for any other reason (captcha, ban, manual .stop).
     """
@@ -69,6 +72,8 @@ class OwOHealth(commands.Cog):
     def _next_wait(self):
         if self.paused_by_me:
             return random.uniform(*RECOVERY_INTERVAL_S)
+        if self.fail_count > 0:
+            return random.uniform(*CONFIRM_INTERVAL_S)
         minutes = random.choice(INTERVAL_MINUTES)
         return max(30.0, minutes * 60 + random.uniform(-INTERVAL_JITTER_S, INTERVAL_JITTER_S))
 
@@ -77,9 +82,10 @@ class OwOHealth(commands.Cog):
         while self.bot.active:
             await asyncio.sleep(self._next_wait())
 
-            if self.bot.stats.get('captcha_active'):
-                continue
-            if self.bot.paused and not self.paused_by_me:
+            if self.bot.stats.get('captcha_active') or (self.bot.paused and not self.paused_by_me):
+                # a half-finished confirmation streak is stale once someone
+                # else holds the pause; start fresh when farming resumes
+                self.fail_count = 0
                 continue
 
             try:
