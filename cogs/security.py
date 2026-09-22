@@ -328,6 +328,19 @@ class Security(commands.Cog):
         error_message += "\n\n⚠️ Captcha đã fail, cần kiểm tra và xử lý thủ công."
         self._start_continuous_captcha_alert(title, error_message)
 
+    def _pause_for_incident(self):
+        """Pause for a captcha/ban and take ownership of that pause.
+
+        If the OwO health monitor was already holding the pause for an outage, it
+        must let go: otherwise its next healthy ping would un-pause the account,
+        which _captcha_already_resolved reads as "user handled it" and silently
+        drops the captcha alert.
+        """
+        self.bot.paused = True
+        health = self.bot.get_cog("OwOHealth")
+        if health:
+            health.release_pause()
+
     def _captcha_already_resolved(self):
         """True if auto-solve/manual flow already cleared this captcha."""
         status = self.bot.stats.get('captcha_status', 'pending')
@@ -651,7 +664,7 @@ class Security(commands.Cog):
                 else:
                     self.bot.log("ERROR", "AI Solver failed to generate an answer.")
                     self._show_desktop_notification("AI Solver failed! Solve manually.")
-                    self.bot.paused = True
+                    self._pause_for_incident()
                     self.bot.throttle_until = time.time() + 3600
                     self.bot.stats['captcha_status'] = 'failed'
                     self.bot.stats['last_captcha_msg'] = (message.content or "")[:200]
@@ -673,7 +686,7 @@ class Security(commands.Cog):
                 if url_match: captcha_url = url_match.group(0)
             
             if captcha_url:
-                self.bot.paused = True
+                self._pause_for_incident()
                 self.bot.throttle_until = time.time() + 3600
                 self.bot.stats['captcha_status'] = 'pending'
                 self.bot.stats['captcha_alert_count'] = 0
@@ -710,7 +723,7 @@ class Security(commands.Cog):
         is_for_me = self.bot.is_message_for_me(message)
         if not is_for_me: return
         if self._contains_keyword(text_to_check, self.ban_keywords):
-            self.bot.paused = True
+            self._pause_for_incident()
             self.bot.log("ALARM", "BAN DETECTED!")
             await self.play_beep()
             self._show_desktop_notification("Ban detected!")
@@ -722,7 +735,7 @@ class Security(commands.Cog):
             max_warnings = int(warning_match.group(2))
             normalized = self._normalize(text_to_check)
             if any(kw in normalized for kw in ["pleasecomplete", "captcha", "verify", "human"]):
-                self.bot.paused = True
+                self._pause_for_incident()
                 self.bot.throttle_until = time.time() + 3600
                 self.bot.stats['captcha_status'] = 'pending'
                 self.bot.stats['last_captcha_msg'] = text_to_check[:200]
@@ -737,7 +750,7 @@ class Security(commands.Cog):
         has_image = len(message.attachments) > 0
         image_captcha_hit = self._contains_keyword(text_to_check, self.image_captcha_keywords)
         if has_image and image_captcha_hit:
-            self.bot.paused = True
+            self._pause_for_incident()
             self.bot.throttle_until = time.time() + 3600
             self.bot.stats['captcha_status'] = 'pending'
             self.bot.stats['captcha_alert_count'] = 0
@@ -755,7 +768,7 @@ class Security(commands.Cog):
                 captcha_url = url_match.group(0)
         
         if captcha_url or captcha_keywords_hit:
-            self.bot.paused = True
+            self._pause_for_incident()
             self.bot.throttle_until = time.time() + 3600
             self.bot.stats['captcha_status'] = 'pending'
             self.bot.stats['captcha_alert_count'] = 0

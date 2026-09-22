@@ -56,6 +56,15 @@ class OwOHealth(commands.Cog):
         self.paused_by_me = False
         self.last_latency = None
 
+    def release_pause(self):
+        """Called by the security cog when it pauses for a captcha/ban. From then
+        on the pause is not ours: stop pinging and never auto-resume it."""
+        if self.paused_by_me:
+            self.bot.log("SYS", "OwO health: security incident took over the pause — auto-resume disabled.")
+        self.paused_by_me = False
+        self.fail_count = 0
+        self.bad_readings = []
+
     def cog_unload(self):
         if self.task and not self.task.done():
             self.task.cancel()
