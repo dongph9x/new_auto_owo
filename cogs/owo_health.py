@@ -20,7 +20,7 @@ from discord.ext import commands
 # Tuning lives here on purpose — this monitor is not exposed in settings.json.
 INTERVAL_MINUTES = [1, 2, 3]   # one of these is picked at random before every ping
 INTERVAL_JITTER_S = 10         # so pings never land on an exact minute boundary
-RECOVERY_INTERVAL_S = (10, 30) # while paused by this cog, re-ping after a random delay in this range
+RECOVERY_INTERVAL_S = (15, 30) # while paused by this cog, re-ping after a random delay in this range
 LATENCY_THRESHOLD_MS = 100      # OwO's own reported latency above this counts as "down"
 RESPONSE_TIMEOUT_S = 15        # no pong within this window also counts as "down"
 FAIL_STREAK = 1                # consecutive bad checks required before pausing
