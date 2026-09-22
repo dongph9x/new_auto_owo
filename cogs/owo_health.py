@@ -52,6 +52,7 @@ class OwOHealth(commands.Cog):
         self.task = None
         self.waiter = None
         self.fail_count = 0
+        self.bad_readings = []  # labels of the current bad streak, shown in the alert
         self.paused_by_me = False
         self.last_latency = None
 
@@ -86,6 +87,7 @@ class OwOHealth(commands.Cog):
                 # a half-finished confirmation streak is stale once someone
                 # else holds the pause; start fresh when farming resumes
                 self.fail_count = 0
+                self.bad_readings = []
                 continue
 
             try:
@@ -111,9 +113,9 @@ class OwOHealth(commands.Cog):
         self.last_latency = latency
 
         if latency is None:
-            await self._on_bad(f"No reply to `{self.bot.prefix}ping` within {RESPONSE_TIMEOUT_S}s")
+            await self._on_bad(f"No reply to `{self.bot.prefix}ping` within {RESPONSE_TIMEOUT_S}s", "no reply")
         elif latency > LATENCY_THRESHOLD_MS:
-            await self._on_bad(f"OwO latency {latency:.0f}ms (threshold {LATENCY_THRESHOLD_MS}ms)")
+            await self._on_bad(f"OwO latency {latency:.0f}ms (threshold {LATENCY_THRESHOLD_MS}ms)", f"{latency:.0f}ms")
         else:
             await self._on_good(latency)
 
@@ -129,8 +131,10 @@ class OwOHealth(commands.Cog):
             self.bot.last_sent_time = time.time()
             return await self.bot._send_safe(content, skip_typing=True)
 
-    async def _on_bad(self, reason):
+    async def _on_bad(self, reason, label):
         self.fail_count += 1
+        # keep only the latest streak so this doesn't grow while we sit paused
+        self.bad_readings = (self.bad_readings + [label])[-FAIL_STREAK:]
         self.bot.log("WARN", f"OwO health: {reason} ({self.fail_count}/{FAIL_STREAK})")
 
         if self.fail_count < FAIL_STREAK or self.bot.paused:
@@ -144,14 +148,17 @@ class OwOHealth(commands.Cog):
             tail = f"It will resume by itself once `{self.bot.prefix}ping` is healthy again."
         else:
             tail = "Resume manually with `.start`."
+        readings = " → ".join(self.bad_readings)
         await self._alert(
             "OWO BOT DOWN — ACCOUNT PAUSED",
-            f"{reason}\n\nFarming has been paused automatically. {tail}"
+            f"Last {len(self.bad_readings)} pings: {readings} (threshold {LATENCY_THRESHOLD_MS}ms)\n\n"
+            f"Farming has been paused automatically. {tail}"
         )
 
     async def _on_good(self, latency):
         had_failures = self.fail_count > 0
         self.fail_count = 0
+        self.bad_readings = []
 
         if not self.paused_by_me:
             if had_failures:
