@@ -185,6 +185,8 @@ class OwOHealth(commands.Cog):
         )
 
     async def _on_good(self, latency):
+        if self.paused_by_me:
+            self.bot.log("INFO", f"OwO health: pong {latency:.0f}ms while paused — checking whether to resume.")
         had_failures = self.fail_count > 0
         self.fail_count = 0
         self.bad_readings = []
@@ -202,13 +204,15 @@ class OwOHealth(commands.Cog):
         if not AUTO_RESUME:
             return
 
-        self.paused_by_me = False
         # Never fight the security cog for the pause: a captcha that landed while
-        # we were paused must keep the account down.
+        # we were paused must keep the account down. Keep ownership here — dropping
+        # it would stop the loop from pinging at all, stranding the account paused
+        # even after both OwO and the captcha are fine again.
         if self.bot.stats.get('captcha_active') or self.bot.stats.get('captcha_status') == 'pending':
-            self.bot.log("WARN", "OwO recovered but captcha is pending — staying paused.")
+            self.bot.log("WARN", f"OwO healthy ({latency:.0f}ms) but captcha is pending — staying paused.")
             return
 
+        self.paused_by_me = False
         self.bot.paused = False
         self.bot.throttle_until = 0
         self.bot.log("SUCCESS", f"OwO recovered ({latency:.0f}ms) — farming resumed.")
