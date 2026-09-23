@@ -73,7 +73,8 @@ def get_empty_stats():
         'session_battle_count': 0,
         'session_owo_count': 0,
         'captcha_active': False,
-        'paused': False
+        'paused': False,
+        'paused_by_health': False
     }
 
 _AUTH_FILE = os.path.join(CONFIG_DIR, 'auth.json')
@@ -163,7 +164,8 @@ def save_account_stats():
                 'next_quest_timer': st.get('next_quest_timer'),
                 'current_cash': st.get('current_cash', 0),
                 'captcha_active': st.get('captcha_active', False),
-                'paused': st.get('paused', False)
+                'paused': st.get('paused', False),
+                'paused_by_health': st.get('paused_by_health', False)
             }
         
         os.makedirs('config', exist_ok=True)

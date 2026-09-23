@@ -17,6 +17,8 @@ import time
 import aiohttp
 from discord.ext import commands
 
+import core.state as state
+
 # Tuning lives here on purpose — this monitor is not exposed in settings.json.
 INTERVAL_MINUTES = [1, 2, 3]   # one of these is picked at random before every ping
 INTERVAL_JITTER_S = 10         # so pings never land on an exact minute boundary
@@ -53,8 +55,26 @@ class OwOHealth(commands.Cog):
         self.waiter = None
         self.fail_count = 0
         self.bad_readings = []  # labels of the current bad streak, shown in the alert
-        self.paused_by_me = False
         self.last_latency = None
+
+    @property
+    def paused_by_me(self):
+        """Whether the current pause is ours, persisted with the account's stats.
+
+        A restart used to reset this to False in memory while `paused` itself was
+        restored from data/stats.json, which orphaned the pause: the loop then
+        treated it as somebody else's, stopped pinging, and the account stayed
+        paused forever even after OwO recovered.
+        """
+        return bool(self.bot.stats.get('paused_by_health', False))
+
+    @paused_by_me.setter
+    def paused_by_me(self, value):
+        st = self.bot.stats
+        if st is None:
+            return
+        st['paused_by_health'] = bool(value)
+        state.save_account_stats()
 
     def release_pause(self):
         """Called by the security cog when it pauses for a captcha/ban. From then

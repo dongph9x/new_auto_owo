@@ -38,12 +38,14 @@ class Control(commands.Cog):
                     return
                 self.bot.paused = False
                 state.bot_paused = False
+                self.bot.stats['paused_by_health'] = False  # manual resume drops the health monitor's claim
                 state.active_session_start = time.time()
                 for bot in state.bot_instances:
                     if bot.stats.get('captcha_status') == 'pending':
                         continue  # leave captcha-locked accounts paused
                     bot.paused = False
                     bot.throttle_until = 0
+                    bot.stats['paused_by_health'] = False
                 self.bot.log("SYS", "Bot RESUMED via Chat cmd")
 
 

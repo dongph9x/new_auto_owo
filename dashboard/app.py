@@ -598,6 +598,7 @@ def control():
             return jsonify({'success': False, 'error': 'Captcha chưa verify, không thể resume.'})
         bot.paused = False
         bot.throttle_until = 0
+        bot.stats['paused_by_health'] = False  # a manual resume also drops the health monitor's claim
         bot.log("SYS", "Bot RESUMED via Dashboard")
             
     elif action == 'cash':
@@ -635,6 +636,7 @@ def security():
         bot.throttle_until = 0
         if uid in state.account_stats:
             state.account_stats[uid]['captcha_active'] = False
+            state.account_stats[uid]['paused_by_health'] = False
         state.log_command("SEC", f"User Resumed {bot.username} from Security Alert", "success")
 
     return jsonify({'success': True})
